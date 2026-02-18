@@ -165,8 +165,7 @@ async def start(message: Message, state: FSMContext) -> None:
             default_interval=settings.default_task_interval_sec,
         )
         await crud.get_or_create_settings(session, user.id, default_interval=settings.default_task_interval_sec)
-    await state.set_state(QuickSearch.link)
-    await message.answer(START_TEXT, reply_markup=skip_cancel_keyboard())
+    await message.answer(START_TEXT, reply_markup=main_menu())
     await message.answer(
         "Скидывай ссылку Avito из браузера.\n"
         "Антибан обязателен: /set_proxy /set_proxy_change_url /set_cookies_api_key\n"
