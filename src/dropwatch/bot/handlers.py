@@ -39,7 +39,7 @@ from dropwatch.bot.texts import (
 from dropwatch.common.avito_url import extract_task_name, is_avito_url, parse_search_url
 from dropwatch.common.config import settings
 from dropwatch.common.formatting import format_price
-from dropwatch.common.secrets import encode_secret
+from dropwatch.common.secrets import decode_secret, encode_secret
 from dropwatch.db import crud
 from dropwatch.db.database import get_sessionmaker
 from dropwatch.db.models import Condition, Delivery, SellerType, TaskStatus
@@ -134,6 +134,17 @@ def _words_to_text(words: list[str]) -> str:
     return ", ".join(words)
 
 
+def _missing_antiban_fields(monitor_settings) -> list[str]:
+    missing: list[str] = []
+    if not decode_secret(getattr(monitor_settings, "proxy_b64", None)):
+        missing.append("/set_proxy")
+    if not decode_secret(getattr(monitor_settings, "proxy_change_url_b64", None)):
+        missing.append("/set_proxy_change_url")
+    if not decode_secret(getattr(monitor_settings, "cookies_api_key_b64", None)):
+        missing.append("/set_cookies_api_key")
+    return missing
+
+
 @router.message(Command("start"))
 async def start(message: Message, state: FSMContext) -> None:
     logger.info("Command /start: user_id=%s chat_id=%s", message.from_user.id, message.chat.id)
@@ -151,7 +162,8 @@ async def start(message: Message, state: FSMContext) -> None:
     await message.answer(START_TEXT, reply_markup=skip_cancel_keyboard())
     await message.answer(
         "Скидывай ссылку Avito из браузера.\n"
-        "Доп. команды: /set_proxy /set_proxy_change_url /set_cookies_api_key /set_link /set_filters /start_monitor /stop_monitor"
+        "Антибан обязателен: /set_proxy /set_proxy_change_url /set_cookies_api_key\n"
+        "Доп. команды: /set_link /set_filters /start_monitor /stop_monitor"
     )
 
 
@@ -247,7 +259,14 @@ async def start_monitor(message: Message) -> None:
     logger.info("Command /start_monitor: user_id=%s", message.from_user.id)
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        user, _ = await _get_or_create_user_settings(session, message.from_user.id)
+        user, monitor_settings = await _get_or_create_user_settings(session, message.from_user.id)
+        missing = _missing_antiban_fields(monitor_settings)
+        if missing:
+            await message.answer(
+                "Мониторинг не включен: не заполнен обязательный антибан.\n"
+                f"Сначала выполни: {' '.join(missing)}"
+            )
+            return
         await crud.update_settings(session, user.id, monitor_enabled=True)
     await message.answer("Мониторинг включен.")
 
@@ -461,8 +480,16 @@ async def set_link_keywords_black(message: Message, state: FSMContext) -> None:
             keywords_black_json=json.dumps(black_words, ensure_ascii=False),
         )
     await state.clear()
+    missing = _missing_antiban_fields(monitor_settings)
+    status_line = "Ссылка сохранена и мониторинг запущен."
+    if missing:
+        status_line = (
+            "Ссылка сохранена, но мониторинг пока не включен.\n"
+            "Не заполнен обязательный антибан.\n"
+            f"Заполни: {' '.join(missing)}"
+        )
     await message.answer(
-        "Ссылка сохранена и мониторинг запущен.\n"
+        f"{status_line}\n"
         f"Радар: {task.name}\n"
         f"White: {_words_to_text(data.get('keywords_white') or [])}\n"
         f"Black: {_words_to_text(black_words)}",

@@ -46,6 +46,17 @@ def _build_fetch_profile(user_settings) -> AvitoRuntimeProfile:
     )
 
 
+def _missing_antiban_for_profile(profile: AvitoRuntimeProfile) -> list[str]:
+    missing: list[str] = []
+    if not (profile.proxy or "").strip():
+        missing.append("/set_proxy")
+    if not (profile.proxy_change_url or "").strip():
+        missing.append("/set_proxy_change_url")
+    if not (profile.cookies_api_key or "").strip():
+        missing.append("/set_cookies_api_key")
+    return missing
+
+
 def _price_drop_header(old_price: int | None, new_price: int | None) -> str:
     if old_price is None or new_price is None:
         return "💸 Цена снизилась!"
@@ -280,6 +291,7 @@ async def main() -> None:
     rate_limits: dict[int, RateLimitState] = {}
     blocked_until: dict[int, datetime] = {}
     blocked_notified_until: dict[int, datetime] = {}
+    antiban_notified_until: dict[int, datetime] = {}
     last_request_at: datetime | None = None
 
     while True:
@@ -323,6 +335,20 @@ async def main() -> None:
                         await crud.touch_task(session, task.id, now)
                         continue
                     profile = _build_fetch_profile(user_settings)
+                    missing_antiban = _missing_antiban_for_profile(profile)
+                    if missing_antiban:
+                        notify_until = antiban_notified_until.get(user.id)
+                        if not notify_until or now >= notify_until:
+                            await bot.send_message(
+                                chat_id=user.tg_id,
+                                text=(
+                                    "Мониторинг приостановлен: не заполнен обязательный антибан.\n"
+                                    f"Заполни команды: {' '.join(missing_antiban)}"
+                                ),
+                            )
+                            antiban_notified_until[user.id] = now + timedelta(minutes=30)
+                        await crud.touch_task(session, task.id, now)
+                        continue
                     fetcher = create_fetcher(profile=profile)
 
                     if last_request_at:

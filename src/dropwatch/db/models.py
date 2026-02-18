@@ -74,7 +74,7 @@ class Settings(Base):
     ignore_reserv: Mapped[bool] = mapped_column(Boolean, default=False)
     ignore_promotion: Mapped[bool] = mapped_column(Boolean, default=False)
     interval: Mapped[int] = mapped_column(Integer, default=60)
-    monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

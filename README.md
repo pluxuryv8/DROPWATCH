@@ -42,6 +42,7 @@ PYTHONPATH=src python -m dropwatch.monitor
 - `/start_monitor` и `/stop_monitor` — общий запуск/стоп мониторинга пользователя.
 
 Поддерживаются multiple links и multi-user: настройки и ссылки хранятся в БД отдельно на каждого пользователя.
+Антибан обязателен: без заполненных `/set_proxy` + `/set_proxy_change_url` + `/set_cookies_api_key` мониторинг не включится.
 
 ## Настройки (.env)
 ### Базовые

@@ -89,9 +89,16 @@ class AvitoRuntimeProfile:
 class AvitoSearchFetcher(BaseFetcher):
     def __init__(self, profile: AvitoRuntimeProfile | None = None) -> None:
         self.profile = profile or AvitoRuntimeProfile()
+        strict_profile = profile is not None
+        proxy_value = self.profile.proxy if strict_profile else (self.profile.proxy or settings.avito_proxy)
+        proxy_change_value = (
+            self.profile.proxy_change_url
+            if strict_profile
+            else (self.profile.proxy_change_url or settings.avito_proxy_change_url)
+        )
         self.headers = dict(HEADERS)
-        self.proxy_config = _parse_proxy(self.profile.proxy or settings.avito_proxy)
-        self.proxy_change_url = self.profile.proxy_change_url or settings.avito_proxy_change_url
+        self.proxy_config = _parse_proxy(proxy_value)
+        self.proxy_change_url = proxy_change_value
         self.cookies_api_key = self.profile.cookies_api_key
         self.use_webdriver = (
             self.profile.use_webdriver if self.profile.use_webdriver is not None else settings.avito_use_webdriver

@@ -321,6 +321,7 @@ async def get_or_create_settings(
         avito_links_json="[]",
         keywords_white_json="[]",
         keywords_black_json="[]",
+        monitor_enabled=False,
     )
     session.add(current)
     await session.commit()
