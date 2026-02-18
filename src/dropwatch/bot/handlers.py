@@ -16,6 +16,7 @@ from dropwatch.bot.keyboards import (
     edit_task_fields_keyboard,
     interval_keyboard,
     main_menu,
+    quick_setup_keyboard,
     seller_keyboard,
     settings_keyboard,
     skip_cancel_keyboard,
@@ -47,6 +48,12 @@ from dropwatch.db.models import Condition, Delivery, SellerType, TaskStatus
 
 router = Router()
 logger = logging.getLogger("bot")
+
+LEGACY_CREATE_TASK_TEXTS = {"➕ Создать задачу", "Новый радар"}
+LEGACY_TASKS_TEXTS = {"📋 Мои задачи", "Мои задачи", "Мои радары"}
+LEGACY_SETTINGS_TEXTS = {"⚙ Настройки", "Настройки"}
+LEGACY_FAVORITES_TEXTS = {"⭐ Избранное", "Избранное"}
+LEGACY_HELP_TEXTS = {"❓ Помощь", "Помощь", "Инструкция"}
 
 
 def _parse_int(text: str) -> int | None:
@@ -165,6 +172,7 @@ async def start(message: Message, state: FSMContext) -> None:
         "Антибан обязателен: /set_proxy /set_proxy_change_url /set_cookies_api_key\n"
         "Доп. команды: /set_link /set_filters /start_monitor /stop_monitor"
     )
+    await message.answer("Быстрая настройка:", reply_markup=quick_setup_keyboard())
 
 
 @router.message(Command("set_proxy"))
@@ -173,6 +181,14 @@ async def set_proxy_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SetupState.proxy)
     await message.answer("Введи прокси в формате http://user:pass@ip:port или `none`.", reply_markup=skip_cancel_keyboard())
+
+
+@router.callback_query(F.data == "quickcfg:proxy")
+async def quickcfg_proxy(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(SetupState.proxy)
+    await callback.message.answer("Введи прокси в формате http://user:pass@ip:port или `none`.", reply_markup=skip_cancel_keyboard())
+    await callback.answer()
 
 
 @router.message(SetupState.proxy)
@@ -208,6 +224,14 @@ async def set_proxy_change_url_start(message: Message, state: FSMContext) -> Non
     await message.answer("Введи URL для смены IP или `none`.", reply_markup=skip_cancel_keyboard())
 
 
+@router.callback_query(F.data == "quickcfg:ip")
+async def quickcfg_ip(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(SetupState.proxy_change_url)
+    await callback.message.answer("Введи URL для смены IP или `none`.", reply_markup=skip_cancel_keyboard())
+    await callback.answer()
+
+
 @router.message(SetupState.proxy_change_url)
 async def set_proxy_change_url_finish(message: Message, state: FSMContext) -> None:
     if message.text == CANCEL_TEXT:
@@ -237,6 +261,14 @@ async def set_cookies_api_key_start(message: Message, state: FSMContext) -> None
     await state.clear()
     await state.set_state(SetupState.cookies_api_key)
     await message.answer("Введи API key для cookies (spfa.ru) или `none`.", reply_markup=skip_cancel_keyboard())
+
+
+@router.callback_query(F.data == "quickcfg:cookies")
+async def quickcfg_cookies(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(SetupState.cookies_api_key)
+    await callback.message.answer("Введи API key для cookies (spfa.ru) или `none`.", reply_markup=skip_cancel_keyboard())
+    await callback.answer()
 
 
 @router.message(SetupState.cookies_api_key)
@@ -271,6 +303,24 @@ async def start_monitor(message: Message) -> None:
     await message.answer("Мониторинг включен.")
 
 
+@router.callback_query(F.data == "quickcfg:start")
+async def quickcfg_start_monitor(callback: CallbackQuery) -> None:
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, monitor_settings = await _get_or_create_user_settings(session, callback.from_user.id)
+        missing = _missing_antiban_fields(monitor_settings)
+        if missing:
+            await callback.message.answer(
+                "Мониторинг не включен: не заполнен обязательный антибан.\n"
+                f"Сначала выполни: {' '.join(missing)}"
+            )
+            await callback.answer()
+            return
+        await crud.update_settings(session, user.id, monitor_enabled=True)
+    await callback.message.answer("Мониторинг включен.")
+    await callback.answer()
+
+
 @router.message(Command("stop_monitor"))
 async def stop_monitor(message: Message) -> None:
     logger.info("Command /stop_monitor: user_id=%s", message.from_user.id)
@@ -281,12 +331,33 @@ async def stop_monitor(message: Message) -> None:
     await message.answer("Мониторинг остановлен.")
 
 
+@router.callback_query(F.data == "quickcfg:stop")
+async def quickcfg_stop_monitor(callback: CallbackQuery) -> None:
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, _ = await _get_or_create_user_settings(session, callback.from_user.id)
+        await crud.update_settings(session, user.id, monitor_enabled=False)
+    await callback.message.answer("Мониторинг остановлен.")
+    await callback.answer()
+
+
 @router.message(Command("set_filters"))
 async def set_filters_start(message: Message, state: FSMContext) -> None:
     logger.info("Command /set_filters: user_id=%s", message.from_user.id)
     await state.clear()
     await state.set_state(FiltersSetupState.max_age)
     await message.answer("Макс. возраст объявления в секундах (или `0`/`none` для отключения):", reply_markup=skip_cancel_keyboard())
+
+
+@router.callback_query(F.data == "quickcfg:filters")
+async def quickcfg_filters(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(FiltersSetupState.max_age)
+    await callback.message.answer(
+        "Макс. возраст объявления в секундах (или `0`/`none` для отключения):",
+        reply_markup=skip_cancel_keyboard(),
+    )
+    await callback.answer()
 
 
 @router.message(FiltersSetupState.max_age)
@@ -355,6 +426,14 @@ async def set_link_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(LinkSetupState.url)
     await message.answer("Отправь ссылку на поиск Avito.", reply_markup=skip_cancel_keyboard())
+
+
+@router.callback_query(F.data == "quickcfg:link")
+async def quickcfg_link(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(LinkSetupState.url)
+    await callback.message.answer("Отправь ссылку на поиск Avito.", reply_markup=skip_cancel_keyboard())
+    await callback.answer()
 
 
 @router.message(LinkSetupState.url)
@@ -509,6 +588,11 @@ async def help_menu(message: Message) -> None:
     await message.answer(HELP_TEXT)
 
 
+@router.message(StateFilter(None), F.text.in_(LEGACY_HELP_TEXTS))
+async def help_menu_legacy(message: Message) -> None:
+    await help_menu(message)
+
+
 @router.message(StateFilter(None), F.text.contains("avito"))
 async def quick_link_anywhere(message: Message, state: FSMContext) -> None:
     logger.info(
@@ -634,6 +718,11 @@ async def create_task_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(CreateTask.name)
     await message.answer("Как назовём радар?", reply_markup=skip_cancel_keyboard())
+
+
+@router.message(StateFilter(None), F.text.in_(LEGACY_CREATE_TASK_TEXTS))
+async def create_task_start_legacy(message: Message, state: FSMContext) -> None:
+    await create_task_start(message, state)
 
 
 @router.message(CreateTask.name)
@@ -934,6 +1023,11 @@ async def list_tasks(message: Message) -> None:
         )
         tasks = await crud.list_tasks(session, user.id)
     await message.answer("Твои радары:", reply_markup=tasks_keyboard(tasks))
+
+
+@router.message(StateFilter(None), F.text.in_(LEGACY_TASKS_TEXTS))
+async def list_tasks_legacy(message: Message) -> None:
+    await list_tasks(message)
 
 
 @router.callback_query(F.data.startswith("task:"))
@@ -1255,6 +1349,11 @@ async def settings_menu(message: Message, state: FSMContext) -> None:
     await message.answer("Настройки", reply_markup=settings_keyboard())
 
 
+@router.message(StateFilter(None), F.text.in_(LEGACY_SETTINGS_TEXTS))
+async def settings_menu_legacy(message: Message, state: FSMContext) -> None:
+    await settings_menu(message, state)
+
+
 @router.callback_query(F.data.startswith("settings:"))
 async def settings_choice(callback: CallbackQuery, state: FSMContext) -> None:
     logger.info("Settings choice: user_id=%s data=%s", callback.from_user.id, callback.data)
@@ -1412,6 +1511,11 @@ async def favorites_list(message: Message) -> None:
         if fav.url:
             lines.append(fav.url)
     await message.answer("\n".join(lines))
+
+
+@router.message(StateFilter(None), F.text.in_(LEGACY_FAVORITES_TEXTS))
+async def favorites_list_legacy(message: Message) -> None:
+    await favorites_list(message)
 
 
 @router.callback_query(F.data.startswith("seen:"))
