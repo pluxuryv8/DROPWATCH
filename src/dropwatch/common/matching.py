@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import re
 
 from dropwatch.common.config import settings
@@ -38,21 +39,38 @@ def _match_minus_words(text: str, minus_words: str | None) -> bool:
     return not any(token in haystack for token in tokens)
 
 
-def matches_task(task, listing) -> bool:
+def matches_task(task, listing, monitor_settings=None) -> bool:
     text = f"{listing.title or ''} {listing.description or ''}"
-    if settings.avito_keywords_whitelist and not _match_global_whitelist(text, settings.avito_keywords_whitelist):
+    whitelist_csv = settings.avito_keywords_whitelist
+    blacklist_csv = settings.avito_keywords_blacklist
+    user_whitelist = _json_list(getattr(monitor_settings, "keywords_white_json", None))
+    user_blacklist = _json_list(getattr(monitor_settings, "keywords_black_json", None))
+    if user_whitelist:
+        whitelist_csv = ",".join(user_whitelist)
+    if user_blacklist:
+        blacklist_csv = ",".join(user_blacklist)
+
+    if whitelist_csv and not _match_global_whitelist(text, whitelist_csv):
         return False
-    if settings.avito_keywords_blacklist and _match_global_blacklist(text, settings.avito_keywords_blacklist):
+    if blacklist_csv and _match_global_blacklist(text, blacklist_csv):
         return False
     if not _match_keywords(text, task.keywords):
         return False
     if not _match_minus_words(text, task.minus_keywords):
         return False
 
+    min_price = task.price_min
+    max_price = task.price_max
+    if monitor_settings:
+        if min_price is None:
+            min_price = getattr(monitor_settings, "min_price", None)
+        if max_price is None:
+            max_price = getattr(monitor_settings, "max_price", None)
+
     if listing.price is not None:
-        if task.price_min is not None and listing.price < task.price_min:
+        if min_price is not None and listing.price < min_price:
             return False
-        if task.price_max is not None and listing.price > task.price_max:
+        if max_price is not None and listing.price > max_price:
             return False
 
     if task.city:
@@ -70,9 +88,17 @@ def matches_task(task, listing) -> bool:
         if task.category.lower() not in listing.category.lower():
             return False
 
-    if settings.avito_ignore_reserved and getattr(listing, "is_reserved", False):
+    ignore_reserved = settings.avito_ignore_reserved
+    ignore_promotion = settings.avito_ignore_promotion
+    max_age_sec = settings.avito_max_age_sec
+    if monitor_settings:
+        ignore_reserved = bool(getattr(monitor_settings, "ignore_reserv", ignore_reserved))
+        ignore_promotion = bool(getattr(monitor_settings, "ignore_promotion", ignore_promotion))
+        max_age_sec = int(getattr(monitor_settings, "max_age", max_age_sec) or 0)
+
+    if ignore_reserved and getattr(listing, "is_reserved", False):
         return False
-    if settings.avito_ignore_promotion and getattr(listing, "is_promotion", False):
+    if ignore_promotion and getattr(listing, "is_promotion", False):
         return False
 
     if settings.avito_seller_blacklist and getattr(listing, "seller_id", None):
@@ -80,9 +106,9 @@ def matches_task(task, listing) -> bool:
         if listing.seller_id in blacklist:
             return False
 
-    if settings.avito_max_age_sec > 0 and getattr(listing, "published_at", None):
+    if max_age_sec > 0 and getattr(listing, "published_at", None):
         age_sec = (datetime.utcnow() - listing.published_at).total_seconds()
-        if age_sec > settings.avito_max_age_sec:
+        if age_sec > max_age_sec:
             return False
 
     # Доп. поля (если источник их поддерживает)
@@ -105,6 +131,18 @@ def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
 
 
 def _match_global_whitelist(text: str, whitelist: str) -> bool:

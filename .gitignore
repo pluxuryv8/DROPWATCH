@@ -15,6 +15,7 @@ __pycache__/
 
 # Virtual envs
 .venv/
+.venv*/
 venv/
 env/
 
@@ -28,3 +29,4 @@ env/
 
 # Avito cookies
 avito_cookies.json
+avito_cookies_user_*.json

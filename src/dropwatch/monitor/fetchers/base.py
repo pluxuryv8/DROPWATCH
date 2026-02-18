@@ -10,14 +10,14 @@ class BaseFetcher(ABC):
     is_global: bool = False
 
     @abstractmethod
-    async def fetch(self, task=None) -> list[Listing]:
+    async def fetch(self, task=None, profile=None) -> list[Listing]:
         raise NotImplementedError
 
 
 class GlobalFetcher(BaseFetcher):
     is_global = True
 
-    async def fetch(self, task=None) -> list[Listing]:
+    async def fetch(self, task=None, profile=None) -> list[Listing]:
         return await self.fetch_all()
 
     @abstractmethod

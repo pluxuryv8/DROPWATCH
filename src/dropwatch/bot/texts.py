@@ -26,7 +26,14 @@ HELP_TEXT = (
     "• Пауза/стоп/удаление — в разделе «Мои радары»\n\n"
     "Команды:\n"
     "/start — запуск\n"
-    "/help — подсказка"
+    "/help — подсказка\n"
+    "/set_proxy — задать прокси\n"
+    "/set_proxy_change_url — URL смены IP\n"
+    "/set_cookies_api_key — API ключ cookies\n"
+    "/set_link — добавить ссылку Avito\n"
+    "/set_filters — фильтры мониторинга\n"
+    "/start_monitor — включить мониторинг\n"
+    "/stop_monitor — остановить мониторинг"
 )
 
 SKIP_TEXT = "Пропустить"

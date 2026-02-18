@@ -13,6 +13,7 @@ from typing import Any, Iterable
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
+import requests
 from bs4 import BeautifulSoup
 from curl_cffi import requests as curl_requests
 
@@ -70,27 +71,54 @@ class ProxyConfig:
     password: str | None
 
 
+@dataclass(slots=True)
+class AvitoRuntimeProfile:
+    proxy: str | None = None
+    proxy_change_url: str | None = None
+    cookies_api_key: str | None = None
+    cookies_path: str | None = None
+    use_webdriver: bool | None = None
+    max_pages: int | None = None
+    pause_sec: float | None = None
+    max_retries: int | None = None
+    timeout_sec: int | None = None
+    parse_views: bool | None = None
+    views_delay_sec: float | None = None
+
+
 class AvitoSearchFetcher(BaseFetcher):
-    def __init__(self) -> None:
+    def __init__(self, profile: AvitoRuntimeProfile | None = None) -> None:
+        self.profile = profile or AvitoRuntimeProfile()
         self.headers = dict(HEADERS)
-        self.proxy_config = _parse_proxy(settings.avito_proxy)
-        self.proxy_change_url = settings.avito_proxy_change_url
-        self.use_webdriver = settings.avito_use_webdriver
-        self.max_pages = max(1, settings.avito_max_pages)
-        self.pause_sec = max(0.0, settings.avito_pause_sec)
-        self.max_retries = max(1, settings.avito_max_retries)
-        self.timeout_sec = settings.avito_request_timeout_sec
+        self.proxy_config = _parse_proxy(self.profile.proxy or settings.avito_proxy)
+        self.proxy_change_url = self.profile.proxy_change_url or settings.avito_proxy_change_url
+        self.cookies_api_key = self.profile.cookies_api_key
+        self.use_webdriver = (
+            self.profile.use_webdriver if self.profile.use_webdriver is not None else settings.avito_use_webdriver
+        )
+        self.max_pages = max(1, self.profile.max_pages or settings.avito_max_pages)
+        self.pause_sec = max(0.0, self.profile.pause_sec if self.profile.pause_sec is not None else settings.avito_pause_sec)
+        self.max_retries = max(1, self.profile.max_retries or settings.avito_max_retries)
+        self.timeout_sec = self.profile.timeout_sec or settings.avito_request_timeout_sec
         self.impersonate = settings.avito_impersonate
-        self.parse_views = settings.avito_parse_views
-        self.views_delay_sec = max(0.0, settings.avito_views_delay_sec)
-        self.cookies_path = settings.avito_cookies_path
+        self.parse_views = (
+            self.profile.parse_views if self.profile.parse_views is not None else settings.avito_parse_views
+        )
+        self.views_delay_sec = max(
+            0.0,
+            self.profile.views_delay_sec if self.profile.views_delay_sec is not None else settings.avito_views_delay_sec,
+        )
+        self.cookies_path = self.profile.cookies_path or settings.avito_cookies_path
         self.session = curl_requests.Session()
         self.cookies = _load_cookies(self.cookies_path)
+        self.external_cookie_id: str | None = None
         self._apply_cookies()
         self.good_request_count = 0
         self.bad_request_count = 0
 
-    async def fetch(self, task=None) -> list[Listing]:
+    async def fetch(self, task=None, profile=None) -> list[Listing]:
+        if profile is not None:
+            return await AvitoSearchFetcher(profile=profile).fetch(task=task)
         if not task or not task.search_url:
             logger.info("AvitoSearchFetcher: no task url")
             return []
@@ -171,6 +199,7 @@ class AvitoSearchFetcher(BaseFetcher):
                     except ValueError:
                         last_retry_after = None
                 self._reset_session()
+                self._refresh_cookies_from_api()
                 if attempt >= 3:
                     self._refresh_cookies()
                 self._change_ip()
@@ -217,6 +246,56 @@ class AvitoSearchFetcher(BaseFetcher):
                 self.headers["user-agent"] = user_agent
             self._apply_cookies()
             _save_cookies(self.cookies_path, self.cookies)
+
+    def _refresh_cookies_from_api(self) -> None:
+        api_key = (self.cookies_api_key or "").strip()
+        if not api_key:
+            return
+        if self.external_cookie_id:
+            try:
+                requests.post(
+                    "https://spfa.ru/api/unblock/",
+                    json={"id": self.external_cookie_id, "api_key": api_key},
+                    timeout=15,
+                )
+            except requests.RequestException:
+                logger.debug("Avito external cookies unblock failed", exc_info=True)
+        payload: dict[str, Any] = {"api_key": api_key}
+        if self.external_cookie_id:
+            payload["id"] = self.external_cookie_id
+        try:
+            response = requests.post("https://spfa.ru/api/cookies/", json=payload, timeout=20)
+        except requests.RequestException:
+            logger.warning("Avito external cookies request failed", exc_info=True)
+            return
+        if not response.ok:
+            logger.warning("Avito external cookies bad status=%s", response.status_code)
+            return
+        try:
+            data = response.json()
+        except ValueError:
+            logger.warning("Avito external cookies invalid JSON")
+            return
+        record = {}
+        if isinstance(data, dict):
+            if isinstance(data.get("results"), dict):
+                record = data["results"]
+            elif isinstance(data.get("data"), dict):
+                record = data["data"]
+            else:
+                record = data
+        cookie_id = record.get("id")
+        if cookie_id:
+            self.external_cookie_id = str(cookie_id)
+        raw_cookies = record.get("cookies")
+        parsed = _normalize_external_cookies(raw_cookies)
+        if not parsed:
+            logger.warning("Avito external cookies missing payload")
+            return
+        self.cookies = parsed
+        self._apply_cookies()
+        _save_cookies(self.cookies_path, self.cookies)
+        logger.info("Avito cookies updated from external API")
 
     def _change_ip(self) -> None:
         if not self.proxy_change_url:
@@ -467,6 +546,34 @@ def _save_cookies(path: str, cookies: dict[str, str]) -> None:
         logger.debug("Avito cookies write failed", exc_info=True)
 
 
+def _normalize_external_cookies(raw: Any) -> dict[str, str]:
+    if isinstance(raw, dict):
+        return {str(k): str(v) for k, v in raw.items() if k and v is not None}
+    if isinstance(raw, str):
+        cookie_map: dict[str, str] = {}
+        for chunk in raw.split(";"):
+            part = chunk.strip()
+            if "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+            cookie_map[key] = value.strip()
+        return cookie_map
+    if isinstance(raw, list):
+        cookie_map = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            value = item.get("value")
+            if name and value is not None:
+                cookie_map[str(name)] = str(value)
+        return cookie_map
+    return {}
+
+
 def _parse_proxy(proxy_string: str | None) -> ProxyConfig:
     if not proxy_string:
         return ProxyConfig(proxy_url=None, server=None, username=None, password=None)
@@ -522,16 +629,23 @@ async def _get_cookies_via_playwright(proxy: ProxyConfig) -> tuple[dict[str, str
 
     browser = None
     try:
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=[
+        launch_args = {
+            "headless": True,
+            "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--start-maximized",
                 "--window-size=1920,1080",
             ],
-        )
+        }
+        if proxy.server:
+            launch_args["proxy"] = {
+                "server": proxy.server,
+                "username": proxy.username,
+                "password": proxy.password,
+            }
+        browser = await playwright.chromium.launch(**launch_args)
         context_args = {
             "user_agent": user_agent,
             "viewport": {"width": 1920, "height": 1080},

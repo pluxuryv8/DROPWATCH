@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     database_url: str = Field(default="sqlite+aiosqlite:///./dropwatch.db", alias="DATABASE_URL")
 
     default_timezone: str = Field(default="Europe/Moscow", alias="DEFAULT_TIMEZONE")
-    default_task_interval_sec: int = Field(default=30, alias="DEFAULT_TASK_INTERVAL_SEC")
+    default_task_interval_sec: int = Field(default=60, alias="DEFAULT_TASK_INTERVAL_SEC")
     scheduler_tick_sec: int = Field(default=30, alias="SCHEDULER_TICK_SEC")
     global_poll_interval_sec: int = Field(default=120, alias="GLOBAL_POLL_INTERVAL_SEC")
     aggregate_threshold: int = Field(default=3, alias="AGGREGATE_THRESHOLD")

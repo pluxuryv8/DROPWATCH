@@ -33,10 +33,15 @@ PYTHONPATH=src python -m dropwatch.monitor
 ```
 
 ## Использование
-1) Открой Avito, настрой поиск, скопируй ссылку.
-2) Отправь ссылку в бота.
-3) Укажи максимальную цену или пропусти.
-4) Готово — новые объявления будут приходить автоматически.
+Все управление теперь можно делать через команды бота (FSM):
+- `/set_proxy` — прокси (`http://user:pass@ip:port` или `none`).
+- `/set_proxy_change_url` — URL смены IP.
+- `/set_cookies_api_key` — API key cookies (spfa.ru) или `none`.
+- `/set_link` — добавить ссылку Avito + min/max цена + white/black слова.
+- `/set_filters` — max age (сек), игнор резерва и промо.
+- `/start_monitor` и `/stop_monitor` — общий запуск/стоп мониторинга пользователя.
+
+Поддерживаются multiple links и multi-user: настройки и ссылки хранятся в БД отдельно на каждого пользователя.
 
 ## Настройки (.env)
 ### Базовые
@@ -47,8 +52,8 @@ PYTHONPATH=src python -m dropwatch.monitor
 
 ### Avito парсер
 - `FETCHER=avito_search` — основной режим.
-- `AVITO_PROXY` — прокси (формат `http://user:pass@host:port`).
-- `AVITO_PROXY_CHANGE_URL` — URL для смены IP (если есть).
+- `AVITO_PROXY` — fallback прокси из env (если не задан через бота).
+- `AVITO_PROXY_CHANGE_URL` — fallback URL для смены IP.
 - `AVITO_USE_WEBDRIVER` — авто‑обновление cookies через Playwright (`true/false`).
 - `AVITO_COOKIES_PATH` — путь к файлу cookies.
 - `AVITO_MAX_PAGES` — сколько страниц листать.
@@ -72,7 +77,7 @@ PYTHONPATH=src python -m dropwatch.monitor
 - `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` — параметры доступа.
 
 ## Частые проблемы
-- **429 / бан / капча**: включи прокси, смени IP, обнови cookies (`AVITO_USE_WEBDRIVER=true`).
+- **429 / бан / капча**: используй `/set_proxy`, `/set_proxy_change_url`, `/set_cookies_api_key` и включи `AVITO_USE_WEBDRIVER=true`.
 - **Нет объявлений**: проверь ссылку, фильтры и лимиты.
 - **Не ставится Playwright**: `playwright install` после `pip install`.
 

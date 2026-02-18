@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import Iterable
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dropwatch.db.models import (
@@ -11,6 +12,7 @@ from dropwatch.db.models import (
     Delivery,
     Favorite,
     NotificationLog,
+    Settings,
     SeenListing,
     SellerType,
     Task,
@@ -135,7 +137,15 @@ async def pause_tasks_for_user(session: AsyncSession, user_id: int) -> None:
 
 
 async def list_due_tasks(session: AsyncSession, now: datetime) -> list[Task]:
-    result = await session.execute(select(Task).where(Task.status == TaskStatus.active))
+    result = await session.execute(
+        select(Task)
+        .join(User, Task.user_id == User.id)
+        .outerjoin(Settings, Settings.user_id == User.id)
+        .where(
+            Task.status == TaskStatus.active,
+            or_(Settings.id.is_(None), Settings.monitor_enabled.is_(True)),
+        )
+    )
     tasks = list(result.scalars())
     due: list[Task] = []
     for task in tasks:
@@ -290,3 +300,51 @@ async def get_user_by_tg(session: AsyncSession, tg_id: int) -> User | None:
 async def get_tasks_for_user(session: AsyncSession, user_id: int) -> list[Task]:
     result = await session.execute(select(Task).where(Task.user_id == user_id))
     return list(result.scalars())
+
+
+async def get_settings(session: AsyncSession, user_id: int) -> Settings | None:
+    result = await session.execute(select(Settings).where(Settings.user_id == user_id))
+    return result.scalars().first()
+
+
+async def get_or_create_settings(
+    session: AsyncSession,
+    user_id: int,
+    default_interval: int,
+) -> Settings:
+    current = await get_settings(session, user_id)
+    if current:
+        return current
+    current = Settings(
+        user_id=user_id,
+        interval=default_interval,
+        avito_links_json="[]",
+        keywords_white_json="[]",
+        keywords_black_json="[]",
+    )
+    session.add(current)
+    await session.commit()
+    await session.refresh(current)
+    return current
+
+
+async def update_settings(session: AsyncSession, user_id: int, **kwargs) -> None:
+    await session.execute(update(Settings).where(Settings.user_id == user_id).values(**kwargs))
+    await session.commit()
+
+
+async def add_link_to_settings(session: AsyncSession, user_id: int, link: str) -> None:
+    settings_row = await get_or_create_settings(session, user_id=user_id, default_interval=60)
+    try:
+        links = json.loads(settings_row.avito_links_json or "[]")
+    except json.JSONDecodeError:
+        links = []
+    if not isinstance(links, list):
+        links = []
+    if link not in links:
+        links.append(link)
+    await update_settings(session, user_id=user_id, avito_links_json=json.dumps(links, ensure_ascii=False))
+
+
+async def remove_all_links_from_settings(session: AsyncSession, user_id: int) -> None:
+    await update_settings(session, user_id=user_id, avito_links_json="[]")

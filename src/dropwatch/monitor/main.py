@@ -12,13 +12,14 @@ from dropwatch.common.formatting import build_listing_summary, format_listing_me
 from dropwatch.common.hash_utils import listing_hash
 from dropwatch.common.logging import setup_logging
 from dropwatch.common.matching import matches_task
+from dropwatch.common.secrets import decode_secret
 from dropwatch.common.time_utils import is_quiet_hours
 from dropwatch.common.types import Listing
 from dropwatch.db import crud
-from dropwatch.db.database import get_sessionmaker, init_db, init_engine
+from dropwatch.db.database import create_db, get_sessionmaker, init_engine
 from dropwatch.db.models import Task
 from dropwatch.monitor.fetchers.factory import create_fetcher
-from dropwatch.monitor.fetchers.avito_search import BlockedError, RateLimitError
+from dropwatch.monitor.fetchers.avito_search import AvitoRuntimeProfile, BlockedError, RateLimitError
 from dropwatch.bot.keyboards import listing_actions_keyboard
 from dropwatch.bot.texts import NEW_DROP_HEADER
 
@@ -33,6 +34,16 @@ class RateLimitState:
     backoff_sec: int
     next_allowed_at: datetime
     success_streak: int = 0
+
+
+def _build_fetch_profile(user_settings) -> AvitoRuntimeProfile:
+    cookies_path_suffix = str(getattr(user_settings, "user_id", "default"))
+    return AvitoRuntimeProfile(
+        proxy=decode_secret(getattr(user_settings, "proxy_b64", None)),
+        proxy_change_url=decode_secret(getattr(user_settings, "proxy_change_url_b64", None)),
+        cookies_api_key=decode_secret(getattr(user_settings, "cookies_api_key_b64", None)),
+        cookies_path=f"./avito_cookies_user_{cookies_path_suffix}.json",
+    )
 
 
 def _price_drop_header(old_price: int | None, new_price: int | None) -> str:
@@ -121,6 +132,14 @@ async def _process_task(
     if not user:
         logger.warning("Task user missing: task_id=%s", task.id)
         return
+    user_settings = await crud.get_or_create_settings(
+        session,
+        user_id=user.id,
+        default_interval=settings.default_task_interval_sec,
+    )
+    if not user_settings.monitor_enabled:
+        logger.info("Skip task: monitoring disabled user_id=%s task_id=%s", user.id, task.id)
+        return
 
     now_utc = datetime.utcnow()
     quiet_mode = is_quiet_hours(now_utc, user.timezone, user.quiet_hours_start, user.quiet_hours_end)
@@ -150,7 +169,7 @@ async def _process_task(
     skipped = 0
 
     for listing in listings:
-        if not matches_task(task, listing):
+        if not matches_task(task, listing, monitor_settings=user_settings):
             skipped += 1
             continue
         matched += 1
@@ -249,13 +268,13 @@ async def _process_task(
 async def main() -> None:
     setup_logging(settings.log_level)
     init_engine(settings.database_url)
-    await init_db()
+    await create_db()
 
     bot = Bot(token=settings.telegram_token)
 
     session_maker = get_sessionmaker()
-    fetcher = create_fetcher()
-    logger.info("Monitor started: fetcher=%s", fetcher.__class__.__name__)
+    bootstrap_fetcher = create_fetcher()
+    logger.info("Monitor started: fetcher=%s", bootstrap_fetcher.__class__.__name__)
 
     last_global_fetch = None
     rate_limits: dict[int, RateLimitState] = {}
@@ -273,10 +292,10 @@ async def main() -> None:
                 continue
 
             listings: list[Listing] = []
-            if fetcher.is_global:
+            if bootstrap_fetcher.is_global:
                 if not last_global_fetch or now - last_global_fetch >= timedelta(seconds=settings.global_poll_interval_sec):
                     logger.info("Global fetch start")
-                    listings = await fetcher.fetch()
+                    listings = await bootstrap_fetcher.fetch()
                     logger.info("Global fetch done: listings=%s", len(listings))
                     last_global_fetch = now
                 else:
@@ -290,6 +309,22 @@ async def main() -> None:
             else:
                 for task in due_tasks:
                     now = datetime.utcnow()
+                    user = await crud.get_user(session, task.user_id)
+                    if not user:
+                        logger.warning("Skip task without user: task_id=%s", task.id)
+                        continue
+                    user_settings = await crud.get_or_create_settings(
+                        session,
+                        user_id=user.id,
+                        default_interval=settings.default_task_interval_sec,
+                    )
+                    if not user_settings.monitor_enabled:
+                        logger.info("Monitor disabled for user_id=%s task_id=%s", user.id, task.id)
+                        await crud.touch_task(session, task.id, now)
+                        continue
+                    profile = _build_fetch_profile(user_settings)
+                    fetcher = create_fetcher(profile=profile)
+
                     if last_request_at:
                         delta = now - last_request_at
                         if delta < timedelta(seconds=MIN_REQUEST_GAP_SEC):
@@ -316,7 +351,7 @@ async def main() -> None:
                         continue
                     logger.info("Task fetch start: task_id=%s url=%s", task.id, task.search_url)
                     try:
-                        listings = await fetcher.fetch(task)
+                        listings = await fetcher.fetch(task=task)
                         last_request_at = datetime.utcnow()
                     except RateLimitError as exc:
                         base = max(30, task.interval_sec)
@@ -348,11 +383,13 @@ async def main() -> None:
                         blocked_until[task.id] = now + timedelta(seconds=cooldown_sec)
                         notify_until = blocked_notified_until.get(task.id)
                         if not notify_until or now >= notify_until:
-                            user = await crud.get_user(session, task.user_id)
                             if user:
                                 await bot.send_message(
                                     chat_id=user.tg_id,
-                                    text="Avito ограничил доступ (бан/капча). Проверьте прокси и cookies.",
+                                    text=(
+                                        "Avito ограничил доступ (бан/капча). "
+                                        "Проверьте /set_proxy, /set_proxy_change_url и /set_cookies_api_key."
+                                    ),
                                 )
                             blocked_notified_until[task.id] = now + timedelta(minutes=30)
                         logger.warning("Blocked: task_id=%s cooldown=%s", task.id, cooldown_sec)

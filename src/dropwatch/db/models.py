@@ -51,6 +51,35 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     tasks: Mapped[list[Task]] = relationship(back_populates="user")
+    settings: Mapped[Settings | None] = relationship(back_populates="user", uselist=False)
+
+
+class Settings(Base):
+    __tablename__ = "settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), unique=True, index=True)
+
+    proxy_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proxy_change_url_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cookies_api_key_b64: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    avito_links_json: Mapped[str] = mapped_column(Text, default="[]")
+    keywords_white_json: Mapped[str] = mapped_column(Text, default="[]")
+    keywords_black_json: Mapped[str] = mapped_column(Text, default="[]")
+
+    min_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_age: Mapped[int] = mapped_column(Integer, default=0)
+    ignore_reserv: Mapped[bool] = mapped_column(Boolean, default=False)
+    ignore_promotion: Mapped[bool] = mapped_column(Boolean, default=False)
+    interval: Mapped[int] = mapped_column(Integer, default=60)
+    monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped[User] = relationship(back_populates="settings")
 
 
 class Task(Base):
@@ -129,4 +158,3 @@ class NotificationLog(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-

@@ -39,3 +39,23 @@ class SettingsState(StatesGroup):
     quiet_end = State()
     notify_limit = State()
     default_interval = State()
+
+
+class SetupState(StatesGroup):
+    proxy = State()
+    proxy_change_url = State()
+    cookies_api_key = State()
+
+
+class LinkSetupState(StatesGroup):
+    url = State()
+    min_price = State()
+    max_price = State()
+    keywords_white = State()
+    keywords_black = State()
+
+
+class FiltersSetupState(StatesGroup):
+    max_age = State()
+    ignore_reserv = State()
+    ignore_promotion = State()

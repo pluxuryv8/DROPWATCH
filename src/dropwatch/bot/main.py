@@ -6,13 +6,13 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from dropwatch.bot.handlers import router
 from dropwatch.common.config import settings
 from dropwatch.common.logging import setup_logging
-from dropwatch.db.database import init_db, init_engine
+from dropwatch.db.database import create_db, init_engine
 
 
 async def main() -> None:
     setup_logging(settings.log_level)
     init_engine(settings.database_url)
-    await init_db()
+    await create_db()
 
     bot = Bot(token=settings.telegram_token)
     dp = Dispatcher(storage=MemoryStorage())

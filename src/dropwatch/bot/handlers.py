@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 
@@ -22,7 +23,7 @@ from dropwatch.bot.keyboards import (
     tasks_keyboard,
     events_keyboard,
 )
-from dropwatch.bot.states import CreateTask, EditTask, QuickSearch, SettingsState
+from dropwatch.bot.states import CreateTask, EditTask, FiltersSetupState, LinkSetupState, QuickSearch, SettingsState, SetupState
 from dropwatch.bot.texts import (
     CANCEL_TEXT,
     HELP_TEXT,
@@ -38,6 +39,7 @@ from dropwatch.bot.texts import (
 from dropwatch.common.avito_url import extract_task_name, is_avito_url, parse_search_url
 from dropwatch.common.config import settings
 from dropwatch.common.formatting import format_price
+from dropwatch.common.secrets import encode_secret
 from dropwatch.db import crud
 from dropwatch.db.database import get_sessionmaker
 from dropwatch.db.models import Condition, Delivery, SellerType, TaskStatus
@@ -75,6 +77,21 @@ async def _get_user_task(session, tg_id: int, task_id: int):
     return await crud.get_task(session, task_id, user.id)
 
 
+async def _get_or_create_user_settings(session, tg_id: int):
+    user = await crud.get_or_create_user(
+        session,
+        tg_id=tg_id,
+        timezone_str=settings.default_timezone,
+        default_interval=settings.default_task_interval_sec,
+    )
+    monitor_settings = await crud.get_or_create_settings(
+        session,
+        user_id=user.id,
+        default_interval=settings.default_task_interval_sec,
+    )
+    return user, monitor_settings
+
+
 def _task_summary(data: dict) -> str:
     lines = [
         "Проверь радар:",
@@ -94,21 +111,363 @@ def _task_summary(data: dict) -> str:
     return "\n".join(lines)
 
 
+def _parse_yes_no(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"yes", "y", "да", "д", "1", "true", "on"}:
+        return True
+    if normalized in {"no", "n", "нет", "н", "0", "false", "off"}:
+        return False
+    return None
+
+
+def _split_words(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _words_to_text(words: list[str]) -> str:
+    if not words:
+        return "—"
+    return ", ".join(words)
+
+
 @router.message(Command("start"))
 async def start(message: Message, state: FSMContext) -> None:
     logger.info("Command /start: user_id=%s chat_id=%s", message.from_user.id, message.chat.id)
     await state.clear()
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.get_or_create_user(
+        user = await crud.get_or_create_user(
             session,
             tg_id=message.from_user.id,
             timezone_str=settings.default_timezone,
             default_interval=settings.default_task_interval_sec,
         )
+        await crud.get_or_create_settings(session, user.id, default_interval=settings.default_task_interval_sec)
     await state.set_state(QuickSearch.link)
     await message.answer(START_TEXT, reply_markup=skip_cancel_keyboard())
-    await message.answer("Скидывай ссылку Avito из браузера.")
+    await message.answer(
+        "Скидывай ссылку Avito из браузера.\n"
+        "Доп. команды: /set_proxy /set_proxy_change_url /set_cookies_api_key /set_link /set_filters /start_monitor /stop_monitor"
+    )
+
+
+@router.message(Command("set_proxy"))
+async def set_proxy_start(message: Message, state: FSMContext) -> None:
+    logger.info("Command /set_proxy: user_id=%s", message.from_user.id)
+    await state.clear()
+    await state.set_state(SetupState.proxy)
+    await message.answer("Введи прокси в формате http://user:pass@ip:port или `none`.", reply_markup=skip_cancel_keyboard())
+
+
+@router.message(SetupState.proxy)
+async def set_proxy_finish(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    raw = (message.text or "").strip()
+    proxy_value: str | None
+    if raw.lower() in {"none", "no", "нет", "off"} or raw == SKIP_TEXT:
+        proxy_value = None
+    else:
+        if "://" not in raw:
+            raw = f"http://{raw}"
+        if "@" not in raw or ":" not in raw:
+            await message.answer("Некорректный формат. Используй http://user:pass@ip:port или `none`.")
+            return
+        proxy_value = raw
+
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, _ = await _get_or_create_user_settings(session, message.from_user.id)
+        await crud.update_settings(session, user.id, proxy_b64=encode_secret(proxy_value))
+    await state.clear()
+    await message.answer("Прокси сохранен.", reply_markup=main_menu())
+
+
+@router.message(Command("set_proxy_change_url"))
+async def set_proxy_change_url_start(message: Message, state: FSMContext) -> None:
+    logger.info("Command /set_proxy_change_url: user_id=%s", message.from_user.id)
+    await state.clear()
+    await state.set_state(SetupState.proxy_change_url)
+    await message.answer("Введи URL для смены IP или `none`.", reply_markup=skip_cancel_keyboard())
+
+
+@router.message(SetupState.proxy_change_url)
+async def set_proxy_change_url_finish(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    raw = (message.text or "").strip()
+    value: str | None
+    if raw.lower() in {"none", "no", "нет", "off"} or raw == SKIP_TEXT:
+        value = None
+    else:
+        if not raw.startswith(("http://", "https://")):
+            await message.answer("URL должен начинаться с http:// или https://")
+            return
+        value = raw
+
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, _ = await _get_or_create_user_settings(session, message.from_user.id)
+        await crud.update_settings(session, user.id, proxy_change_url_b64=encode_secret(value))
+    await state.clear()
+    await message.answer("URL смены IP сохранен.", reply_markup=main_menu())
+
+
+@router.message(Command("set_cookies_api_key"))
+async def set_cookies_api_key_start(message: Message, state: FSMContext) -> None:
+    logger.info("Command /set_cookies_api_key: user_id=%s", message.from_user.id)
+    await state.clear()
+    await state.set_state(SetupState.cookies_api_key)
+    await message.answer("Введи API key для cookies (spfa.ru) или `none`.", reply_markup=skip_cancel_keyboard())
+
+
+@router.message(SetupState.cookies_api_key)
+async def set_cookies_api_key_finish(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    raw = (message.text or "").strip()
+    value = None if raw.lower() in {"none", "no", "нет", "off"} or raw == SKIP_TEXT else raw
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, _ = await _get_or_create_user_settings(session, message.from_user.id)
+        await crud.update_settings(session, user.id, cookies_api_key_b64=encode_secret(value))
+    await state.clear()
+    await message.answer("API key cookies сохранен.", reply_markup=main_menu())
+
+
+@router.message(Command("start_monitor"))
+async def start_monitor(message: Message) -> None:
+    logger.info("Command /start_monitor: user_id=%s", message.from_user.id)
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, _ = await _get_or_create_user_settings(session, message.from_user.id)
+        await crud.update_settings(session, user.id, monitor_enabled=True)
+    await message.answer("Мониторинг включен.")
+
+
+@router.message(Command("stop_monitor"))
+async def stop_monitor(message: Message) -> None:
+    logger.info("Command /stop_monitor: user_id=%s", message.from_user.id)
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, _ = await _get_or_create_user_settings(session, message.from_user.id)
+        await crud.update_settings(session, user.id, monitor_enabled=False)
+    await message.answer("Мониторинг остановлен.")
+
+
+@router.message(Command("set_filters"))
+async def set_filters_start(message: Message, state: FSMContext) -> None:
+    logger.info("Command /set_filters: user_id=%s", message.from_user.id)
+    await state.clear()
+    await state.set_state(FiltersSetupState.max_age)
+    await message.answer("Макс. возраст объявления в секундах (или `0`/`none` для отключения):", reply_markup=skip_cancel_keyboard())
+
+
+@router.message(FiltersSetupState.max_age)
+async def set_filters_max_age(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    if message.text == SKIP_TEXT:
+        max_age = 0
+    else:
+        text = (message.text or "").strip().lower()
+        if text in {"none", "no", "нет", "off"}:
+            max_age = 0
+        else:
+            parsed = _parse_int(text)
+            if parsed is None:
+                await message.answer("Введи число секунд (например, 3600) или `none`.")
+                return
+            max_age = parsed
+    await state.update_data(max_age=max_age)
+    await state.set_state(FiltersSetupState.ignore_reserv)
+    await message.answer("Игнорировать объявления в резерве? (yes/no)")
+
+
+@router.message(FiltersSetupState.ignore_reserv)
+async def set_filters_ignore_reserv(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    parsed = _parse_yes_no(message.text)
+    if parsed is None:
+        await message.answer("Ответь `yes` или `no`.")
+        return
+    await state.update_data(ignore_reserv=parsed)
+    await state.set_state(FiltersSetupState.ignore_promotion)
+    await message.answer("Игнорировать продвинутые объявления? (yes/no)")
+
+
+@router.message(FiltersSetupState.ignore_promotion)
+async def set_filters_ignore_promotion(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    parsed = _parse_yes_no(message.text)
+    if parsed is None:
+        await message.answer("Ответь `yes` или `no`.")
+        return
+    data = await state.get_data()
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, _ = await _get_or_create_user_settings(session, message.from_user.id)
+        await crud.update_settings(
+            session,
+            user.id,
+            max_age=int(data.get("max_age") or 0),
+            ignore_reserv=bool(data.get("ignore_reserv")),
+            ignore_promotion=parsed,
+        )
+    await state.clear()
+    await message.answer("Фильтры сохранены.", reply_markup=main_menu())
+
+
+@router.message(Command("set_link"))
+async def set_link_start(message: Message, state: FSMContext) -> None:
+    logger.info("Command /set_link: user_id=%s", message.from_user.id)
+    await state.clear()
+    await state.set_state(LinkSetupState.url)
+    await message.answer("Отправь ссылку на поиск Avito.", reply_markup=skip_cancel_keyboard())
+
+
+@router.message(LinkSetupState.url)
+async def set_link_url(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    url = (message.text or "").strip()
+    if not is_avito_url(url):
+        await message.answer("Это не похоже на ссылку Avito. Попробуй снова.")
+        return
+    parsed = parse_search_url(url)
+    await state.update_data(
+        search_url=url,
+        name=extract_task_name(url) or "Радар Avito",
+        parsed_min=parsed.get("price_min"),
+        parsed_max=parsed.get("price_max"),
+        parsed_keywords=parsed.get("keywords"),
+    )
+    await state.set_state(LinkSetupState.min_price)
+    await message.answer("Минимальная цена (число) или Пропустить.")
+
+
+@router.message(LinkSetupState.min_price)
+async def set_link_min_price(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    data = await state.get_data()
+    value = data.get("parsed_min")
+    if message.text != SKIP_TEXT:
+        text = (message.text or "").strip().lower()
+        if text in {"none", "no", "нет", "off"}:
+            value = None
+        else:
+            parsed = _parse_int(text)
+            if parsed is None:
+                await message.answer("Введи число или `none`.")
+                return
+            value = parsed
+    await state.update_data(price_min=value)
+    await state.set_state(LinkSetupState.max_price)
+    await message.answer("Максимальная цена (число) или Пропустить.")
+
+
+@router.message(LinkSetupState.max_price)
+async def set_link_max_price(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    data = await state.get_data()
+    value = data.get("parsed_max")
+    if message.text != SKIP_TEXT:
+        text = (message.text or "").strip().lower()
+        if text in {"none", "no", "нет", "off"}:
+            value = None
+        else:
+            parsed = _parse_int(text)
+            if parsed is None:
+                await message.answer("Введи число или `none`.")
+                return
+            value = parsed
+    await state.update_data(price_max=value)
+    await state.set_state(LinkSetupState.keywords_white)
+    await message.answer("Ключевые слова через запятую (white-list) или Пропустить.")
+
+
+@router.message(LinkSetupState.keywords_white)
+async def set_link_keywords_white(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    data = await state.get_data()
+    raw = None if message.text == SKIP_TEXT else (message.text or "").strip()
+    words = _split_words(raw) if raw else _split_words(data.get("parsed_keywords"))
+    await state.update_data(keywords_white=words)
+    await state.set_state(LinkSetupState.keywords_black)
+    await message.answer("Минус-слова через запятую (black-list) или Пропустить.")
+
+
+@router.message(LinkSetupState.keywords_black)
+async def set_link_keywords_black(message: Message, state: FSMContext) -> None:
+    if message.text == CANCEL_TEXT:
+        await _cancel_flow(message, state)
+        return
+    raw = None if message.text == SKIP_TEXT else (message.text or "").strip()
+    black_words = _split_words(raw)
+    data = await state.get_data()
+
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, monitor_settings = await _get_or_create_user_settings(session, message.from_user.id)
+        interval = max(10, int(monitor_settings.interval or settings.default_task_interval_sec))
+        keyword_text = " ".join(data.get("keywords_white") or [])
+        minus_keyword_text = " ".join(black_words) if black_words else None
+        task = await crud.create_task(
+            session,
+            user_id=user.id,
+            name=data.get("name") or "Радар Avito",
+            keywords=keyword_text or None,
+            minus_keywords=minus_keyword_text,
+            category=None,
+            city=None,
+            radius_km=None,
+            price_min=data.get("price_min"),
+            price_max=data.get("price_max"),
+            condition=Condition.any,
+            delivery=Delivery.any,
+            seller_type=SellerType.any,
+            sort_new_first=True,
+            interval_sec=interval,
+            status=TaskStatus.active,
+            search_url=data.get("search_url"),
+            source="avito_search",
+        )
+        await crud.add_link_to_settings(session, user.id, data.get("search_url"))
+        await crud.update_settings(
+            session,
+            user.id,
+            min_price=data.get("price_min"),
+            max_price=data.get("price_max"),
+            keywords_white_json=json.dumps(data.get("keywords_white") or [], ensure_ascii=False),
+            keywords_black_json=json.dumps(black_words, ensure_ascii=False),
+        )
+    await state.clear()
+    await message.answer(
+        "Ссылка сохранена и мониторинг запущен.\n"
+        f"Радар: {task.name}\n"
+        f"White: {_words_to_text(data.get('keywords_white') or [])}\n"
+        f"Black: {_words_to_text(black_words)}",
+        reply_markup=main_menu(),
+    )
 
 
 @router.message(Command("help"))
@@ -202,7 +561,13 @@ async def quick_search_max_price(message: Message, state: FSMContext) -> None:
             logger.warning("Quick max price: user not found user_id=%s", message.from_user.id)
             await message.answer("Сначала нажми /start")
             return
-        await state.update_data(interval_sec=30, price_max=price_max)
+        monitor_settings = await crud.get_or_create_settings(
+            session,
+            user_id=user.id,
+            default_interval=settings.default_task_interval_sec,
+        )
+        interval = int(monitor_settings.interval or settings.default_task_interval_sec)
+        await state.update_data(interval_sec=interval, price_max=price_max)
         data = await state.get_data()
         logger.info(
             "Creating task from quick flow: user_id=%s name=%s price_max=%s",
@@ -210,7 +575,7 @@ async def quick_search_max_price(message: Message, state: FSMContext) -> None:
             data.get("name"),
             data.get("price_max"),
         )
-        await crud.create_task(
+        task = await crud.create_task(
             session,
             user_id=user.id,
             name=data.get("name") or "Радар",
@@ -230,6 +595,8 @@ async def quick_search_max_price(message: Message, state: FSMContext) -> None:
             search_url=data.get("search_url"),
             source=settings.fetcher,
         )
+        if task.search_url:
+            await crud.add_link_to_settings(session, user.id, task.search_url)
     await state.clear()
     await message.answer("Радар включен. Я на дежурстве.", reply_markup=main_menu())
 
@@ -473,9 +840,14 @@ async def create_task_confirm(callback: CallbackQuery, state: FSMContext) -> Non
             timezone_str=settings.default_timezone,
             default_interval=settings.default_task_interval_sec,
         )
+        monitor_settings = await crud.get_or_create_settings(
+            session,
+            user_id=user.id,
+            default_interval=settings.default_task_interval_sec,
+        )
         if data.get("quick_flow"):
             await crud.pause_tasks_for_user(session, user.id)
-        await crud.create_task(
+        task = await crud.create_task(
             session,
             user_id=user.id,
             name=data.get("name") or data.get("keywords") or "Поиск",
@@ -490,11 +862,13 @@ async def create_task_confirm(callback: CallbackQuery, state: FSMContext) -> Non
             delivery=Delivery(data.get("delivery", "any")),
             seller_type=SellerType(data.get("seller_type", "any")),
             sort_new_first=True,
-            interval_sec=int(data.get("interval_sec") or settings.default_task_interval_sec),
+            interval_sec=int(data.get("interval_sec") or monitor_settings.interval or settings.default_task_interval_sec),
             status=TaskStatus.active,
             search_url=data.get("search_url"),
             source=settings.fetcher,
         )
+        if task.search_url:
+            await crud.add_link_to_settings(session, user.id, task.search_url)
     await state.clear()
     await callback.message.edit_text("Готово! Радар запущен.")
     await callback.message.answer(MAIN_MENU_TEXT, reply_markup=main_menu())

@@ -31,3 +31,7 @@ async def init_db() -> None:
         raise RuntimeError("Database engine not initialized")
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+async def create_db() -> None:
+    await init_db()
