@@ -30,19 +30,12 @@ def quick_setup_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🌐 Прокси", callback_data="quickcfg:proxy"),
+                InlineKeyboardButton(text="📱 Моб. прокси", callback_data="quickcfg:proxy"),
                 InlineKeyboardButton(text="🔄 Смена IP", callback_data="quickcfg:ip"),
             ],
             [
-                InlineKeyboardButton(text="🍪 Cookies API", callback_data="quickcfg:cookies"),
                 InlineKeyboardButton(text="🔗 Добавить ссылку", callback_data="quickcfg:link"),
-            ],
-            [
-                InlineKeyboardButton(text="🧰 Фильтры", callback_data="quickcfg:filters"),
-            ],
-            [
                 InlineKeyboardButton(text="▶️ Старт мониторинга", callback_data="quickcfg:start"),
-                InlineKeyboardButton(text="⏹ Стоп мониторинга", callback_data="quickcfg:stop"),
             ],
         ]
     )

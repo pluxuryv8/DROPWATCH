@@ -36,13 +36,12 @@ PYTHONPATH=src python -m dropwatch.monitor
 Все управление теперь можно делать через команды бота (FSM):
 - `/set_proxy` — прокси (`http://user:pass@ip:port` или `none`).
 - `/set_proxy_change_url` — URL смены IP.
-- `/set_cookies_api_key` — API key cookies (spfa.ru) или `none`.
 - `/set_link` — добавить ссылку Avito + min/max цена + white/black слова.
 - `/set_filters` — max age (сек), игнор резерва и промо.
 - `/start_monitor` и `/stop_monitor` — общий запуск/стоп мониторинга пользователя.
 
 Поддерживаются multiple links и multi-user: настройки и ссылки хранятся в БД отдельно на каждого пользователя.
-Антибан обязателен: без заполненных `/set_proxy` + `/set_proxy_change_url` + `/set_cookies_api_key` мониторинг не включится.
+Антибан обязателен: без заполненных `/set_proxy` + `/set_proxy_change_url` мониторинг не включится.
 
 ## Настройки (.env)
 ### Базовые
@@ -78,7 +77,7 @@ PYTHONPATH=src python -m dropwatch.monitor
 - `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` — параметры доступа.
 
 ## Частые проблемы
-- **429 / бан / капча**: используй `/set_proxy`, `/set_proxy_change_url`, `/set_cookies_api_key` и включи `AVITO_USE_WEBDRIVER=true`.
+- **429 / бан / капча**: используй `/set_proxy`, `/set_proxy_change_url` и включи `AVITO_USE_WEBDRIVER=true`.
 - **Нет объявлений**: проверь ссылку, фильтры и лимиты.
 - **Не ставится Playwright**: `playwright install` после `pip install`.
 

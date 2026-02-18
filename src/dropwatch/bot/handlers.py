@@ -147,8 +147,6 @@ def _missing_antiban_fields(monitor_settings) -> list[str]:
         missing.append("/set_proxy")
     if not decode_secret(getattr(monitor_settings, "proxy_change_url_b64", None)):
         missing.append("/set_proxy_change_url")
-    if not decode_secret(getattr(monitor_settings, "cookies_api_key_b64", None)):
-        missing.append("/set_cookies_api_key")
     return missing
 
 
@@ -167,9 +165,7 @@ async def start(message: Message, state: FSMContext) -> None:
         await crud.get_or_create_settings(session, user.id, default_interval=settings.default_task_interval_sec)
     await message.answer(START_TEXT, reply_markup=main_menu())
     await message.answer(
-        "Скидывай ссылку Avito из браузера.\n"
-        "Антибан обязателен: /set_proxy /set_proxy_change_url /set_cookies_api_key\n"
-        "Доп. команды: /set_link /set_filters /start_monitor /stop_monitor"
+        "Антибан обязателен: сначала /set_proxy и /set_proxy_change_url, потом /set_link."
     )
     await message.answer("Быстрая настройка:", reply_markup=quick_setup_keyboard())
 
@@ -252,37 +248,6 @@ async def set_proxy_change_url_finish(message: Message, state: FSMContext) -> No
         await crud.update_settings(session, user.id, proxy_change_url_b64=encode_secret(value))
     await state.clear()
     await message.answer("URL смены IP сохранен.", reply_markup=main_menu())
-
-
-@router.message(Command("set_cookies_api_key"))
-async def set_cookies_api_key_start(message: Message, state: FSMContext) -> None:
-    logger.info("Command /set_cookies_api_key: user_id=%s", message.from_user.id)
-    await state.clear()
-    await state.set_state(SetupState.cookies_api_key)
-    await message.answer("Введи API key для cookies (spfa.ru) или `none`.", reply_markup=skip_cancel_keyboard())
-
-
-@router.callback_query(F.data == "quickcfg:cookies")
-async def quickcfg_cookies(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.clear()
-    await state.set_state(SetupState.cookies_api_key)
-    await callback.message.answer("Введи API key для cookies (spfa.ru) или `none`.", reply_markup=skip_cancel_keyboard())
-    await callback.answer()
-
-
-@router.message(SetupState.cookies_api_key)
-async def set_cookies_api_key_finish(message: Message, state: FSMContext) -> None:
-    if message.text == CANCEL_TEXT:
-        await _cancel_flow(message, state)
-        return
-    raw = (message.text or "").strip()
-    value = None if raw.lower() in {"none", "no", "нет", "off"} or raw == SKIP_TEXT else raw
-    session_maker = get_sessionmaker()
-    async with session_maker() as session:
-        user, _ = await _get_or_create_user_settings(session, message.from_user.id)
-        await crud.update_settings(session, user.id, cookies_api_key_b64=encode_secret(value))
-    await state.clear()
-    await message.answer("API key cookies сохранен.", reply_markup=main_menu())
 
 
 @router.message(Command("start_monitor"))

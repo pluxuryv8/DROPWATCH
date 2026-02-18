@@ -44,7 +44,6 @@ class SettingsState(StatesGroup):
 class SetupState(StatesGroup):
     proxy = State()
     proxy_change_url = State()
-    cookies_api_key = State()
 
 
 class LinkSetupState(StatesGroup):

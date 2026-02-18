@@ -41,7 +41,7 @@ def _build_fetch_profile(user_settings) -> AvitoRuntimeProfile:
     return AvitoRuntimeProfile(
         proxy=decode_secret(getattr(user_settings, "proxy_b64", None)),
         proxy_change_url=decode_secret(getattr(user_settings, "proxy_change_url_b64", None)),
-        cookies_api_key=decode_secret(getattr(user_settings, "cookies_api_key_b64", None)),
+        cookies_api_key=None,
         cookies_path=f"./avito_cookies_user_{cookies_path_suffix}.json",
     )
 
@@ -52,8 +52,6 @@ def _missing_antiban_for_profile(profile: AvitoRuntimeProfile) -> list[str]:
         missing.append("/set_proxy")
     if not (profile.proxy_change_url or "").strip():
         missing.append("/set_proxy_change_url")
-    if not (profile.cookies_api_key or "").strip():
-        missing.append("/set_cookies_api_key")
     return missing
 
 
@@ -414,7 +412,7 @@ async def main() -> None:
                                     chat_id=user.tg_id,
                                     text=(
                                         "Avito ограничил доступ (бан/капча). "
-                                        "Проверьте /set_proxy, /set_proxy_change_url и /set_cookies_api_key."
+                                        "Проверьте /set_proxy и /set_proxy_change_url."
                                     ),
                                 )
                             blocked_notified_until[task.id] = now + timedelta(minutes=30)

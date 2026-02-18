@@ -29,7 +29,6 @@ HELP_TEXT = (
     "/help — подсказка\n"
     "/set_proxy — задать прокси\n"
     "/set_proxy_change_url — URL смены IP\n"
-    "/set_cookies_api_key — API ключ cookies\n"
     "/set_link — добавить ссылку Avito\n"
     "/set_filters — фильтры мониторинга\n"
     "/start_monitor — включить мониторинг\n"
