@@ -1,93 +1,122 @@
-# DROPWATCH — монитор Avito в Telegram
+# DROPWATCH
 
-DROPWATCH — бот, который по ссылке Avito ищет новые объявления каждые N секунд и шлёт их в Telegram с кнопкой «Открыть».
-Внутри уже встроена защита от банов: cookies через Playwright, прокси, повторные попытки, дедупликация.
+Личный Telegram-бот для мониторинга Avito.
 
-## Что умеет
-- Мониторит новые объявления по ссылке сохранённого поиска Avito.
-- Уведомляет в Telegram с кнопками действий и краткой сводкой.
-- Дедупликация: одно и то же объявление не повторяется.
-- Фильтры: ключевые/минус‑слова, цена, город/радиус, категория.
-- Глобальные фильтры: чёрные/белые слова, продавцы, резерв, промо, возраст.
-- (Опционально) LLM‑оценка и сводка.
+Проект рассчитан на одного заказчика: один сервер, один Telegram-владелец, управление только через бот. После первичной настройки клиенту не нужно заходить на сервер и что-то крутить руками.
 
 ## Как это работает
-1) Ты отправляешь ссылку Avito в бота.  
-2) Бот сохраняет задачу.  
-3) Монитор ходит по ссылке, вытаскивает JSON из `script[type="mime/invalid"]`.  
-4) Новые объявления отправляются в Telegram.
 
-## Быстрый старт
-1) Создай `.env` по образцу `.env.example`.
-2) Установи зависимости:
-```bash
+- `bot` принимает команды в Telegram и сохраняет настройки.
+- `monitor` отдельно ходит в Avito, следит за объявлениями и отправляет уведомления.
+- `postgres` хранит радары, уже виденные объявления, избранное и настройки.
+- Если у объявления есть фото, бот старается прислать фото с подписью.
+- Доступ можно ограничить одним Telegram ID через `OWNER_TG_ID`.
+
+## Что нужно заполнить один раз
+
+Минимальный `.env` для продакшена:
+
+- `TELEGRAM_TOKEN`
+- `OWNER_TG_ID`
+- `AVITO_PROXY`
+- `AVITO_PROXY_CHANGE_URL`
+
+Опционально:
+
+- `AVITO_COOKIES_API_KEY`
+
+Шаблон уже есть в [.env.example](/C:/Users/gerog/Desktop/Алексею/DROPWATCH/.env.example).
+`OWNER_TG_ID` удобно узнать через `@userinfobot` в Telegram.
+
+## Быстрый деплой на сервер
+
+1. Установить Docker и Docker Compose.
+2. Скопировать проект на сервер.
+3. Создать `.env` из шаблона:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+4. Заполнить `.env`.
+5. Запустить сервисы:
+
+```powershell
+docker compose up -d --build
+```
+
+После этого клиент открывает бота в Telegram, жмет `/start` и дальше управляет всем оттуда.
+
+## Как запустить радар
+
+В Telegram:
+
+1. Нажать `/start`.
+2. Задать прокси через `/set_proxy`.
+3. Задать URL смены IP через `/set_proxy_change_url`.
+4. Добавить ссылку поиска Avito через `/set_link` или просто отправить ссылку в чат.
+5. Включить мониторинг через `/start_monitor`.
+6. Проверить состояние через `/status`.
+
+Если все нормально, новые объявления начнут приходить в этот же чат.
+
+## Команды клиента
+
+- `/start` открыть меню
+- `/status` посмотреть состояние сервиса
+- `/set_proxy` сохранить прокси
+- `/set_proxy_change_url` сохранить URL смены IP
+- `/set_link` добавить ссылку Avito
+- `/set_filters` настроить фильтры
+- `/start_monitor` включить мониторинг
+- `/stop_monitor` остановить мониторинг
+- `/help` краткая инструкция
+
+## Docker Compose
+
+В проекте есть [docker-compose.yml](/C:/Users/gerog/Desktop/Алексею/DROPWATCH/docker-compose.yml):
+
+- `postgres`
+- `bot`
+- `monitor`
+
+Оба Python-сервиса запускаются отдельно и автоматически перезапускаются через `restart: unless-stopped`.
+
+## Локальная проверка
+
+Для локальной проверки на Windows:
+
+```powershell
 python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-playwright install
-```
-3) Запусти бота и монитор в двух терминалах:
-```bash
-PYTHONPATH=src python -m dropwatch.bot
-PYTHONPATH=src python -m dropwatch.monitor
+.\.venv\Scripts\python -m pip install --upgrade pip
+.\.venv\Scripts\python -m pip install -r requirements.txt
+.\.venv\Scripts\playwright install chromium
+.\scripts\smoke-check.ps1
 ```
 
-## Использование
-Все управление теперь можно делать через команды бота (FSM):
-- `/set_proxy` — прокси (`http://user:pass@ip:port` или `none`).
-- `/set_proxy_change_url` — URL смены IP.
-- `/set_link` — добавить ссылку Avito + min/max цена + white/black слова.
-- `/set_filters` — max age (сек), игнор резерва и промо.
-- `/start_monitor` и `/stop_monitor` — общий запуск/стоп мониторинга пользователя.
+Запуск локально:
 
-Поддерживаются multiple links и multi-user: настройки и ссылки хранятся в БД отдельно на каждого пользователя.
-Антибан обязателен: без заполненных `/set_proxy` + `/set_proxy_change_url` мониторинг не включится.
-
-## Настройки (.env)
-### Базовые
-- `TELEGRAM_TOKEN` — токен бота.
-- `DEFAULT_TASK_INTERVAL_SEC` — интервал проверки по умолчанию (сек).
-- `SCHEDULER_TICK_SEC` — шаг планировщика.
-- `AGGREGATE_THRESHOLD` — если найдено больше N объявлений, пришлёт общий заголовок.
-
-### Avito парсер
-- `FETCHER=avito_search` — основной режим.
-- `AVITO_PROXY` — fallback прокси из env (если не задан через бота).
-- `AVITO_PROXY_CHANGE_URL` — fallback URL для смены IP.
-- `AVITO_USE_WEBDRIVER` — авто‑обновление cookies через Playwright (`true/false`).
-- `AVITO_COOKIES_PATH` — путь к файлу cookies.
-- `AVITO_MAX_PAGES` — сколько страниц листать.
-- `AVITO_PAUSE_SEC` — пауза между страницами.
-- `AVITO_MAX_RETRIES` — попытки при ошибках.
-- `AVITO_REQUEST_TIMEOUT_SEC` — таймаут запроса.
-- `AVITO_IMPERSONATE` — профиль `curl_cffi` (например `chrome`).
-
-### Фильтры
-- `AVITO_PARSE_VIEWS` — парсить просмотры (медленно).
-- `AVITO_VIEWS_DELAY_SEC` — задержка между запросами на просмотры.
-- `AVITO_IGNORE_RESERVED` — игнорировать «в резерве».
-- `AVITO_IGNORE_PROMOTION` — игнорировать «Продвинуто».
-- `AVITO_MAX_AGE_SEC` — максимальный возраст объявления (0 = выкл).
-- `AVITO_SELLER_BLACKLIST` — продавцы в чёрном списке (через запятую).
-- `AVITO_KEYWORDS_WHITELIST`/`AVITO_KEYWORDS_BLACKLIST` — глобальные слова‑фильтры (через запятую).
-- `AVITO_GEO_FILTER` — глобальный фильтр по адресу (подстрока).
-
-### LLM (опционально)
-- `LLM_ENABLED=true` — включить краткую сводку и оценку.
-- `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` — параметры доступа.
-
-## Частые проблемы
-- **429 / бан / капча**: используй `/set_proxy`, `/set_proxy_change_url` и включи `AVITO_USE_WEBDRIVER=true`.
-- **Нет объявлений**: проверь ссылку, фильтры и лимиты.
-- **Не ставится Playwright**: `playwright install` после `pip install`.
-
-## Docker
-```bash
-docker compose up --build
+```powershell
+.\scripts\start-local.ps1
 ```
 
-## Структура проекта
-- `src/dropwatch/bot` — Telegram‑бот.
-- `src/dropwatch/monitor` — монитор (парсер + логика задач).
-- `src/dropwatch/db` — БД и модели.
-- `src/dropwatch/common` — конфиг, форматирование, матчинг.
+Или по отдельности:
+
+```powershell
+.\scripts\start-bot.ps1
+.\scripts\start-monitor.ps1
+```
+
+## Ограничения
+
+- Стабильность Avito в первую очередь зависит от качества прокси.
+- Если Avito меняет HTML или антибот-защиту, fetcher надо обновлять.
+- Честные проверки каждые 30 секунд реальны для небольшого числа радаров. Для большого числа задач нужно отдельно тюнить интервалы и throttling.
+
+## Структура
+
+- `src/dropwatch/bot` — Telegram-интерфейс
+- `src/dropwatch/monitor` — worker и fetcher Avito
+- `src/dropwatch/db` — модели и CRUD
+- `src/dropwatch/common` — конфиг, форматирование, утилиты
+- `scripts` — локальные скрипты запуска и smoke-check

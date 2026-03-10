@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     telegram_token: str = Field(alias="TELEGRAM_TOKEN")
+    owner_tg_id: int | None = Field(default=None, alias="OWNER_TG_ID")
     database_url: str = Field(default="sqlite+aiosqlite:///./dropwatch.db", alias="DATABASE_URL")
 
     default_timezone: str = Field(default="Europe/Moscow", alias="DEFAULT_TIMEZONE")
@@ -15,12 +16,14 @@ class Settings(BaseSettings):
     scheduler_tick_sec: int = Field(default=30, alias="SCHEDULER_TICK_SEC")
     global_poll_interval_sec: int = Field(default=120, alias="GLOBAL_POLL_INTERVAL_SEC")
     aggregate_threshold: int = Field(default=3, alias="AGGREGATE_THRESHOLD")
+    min_request_gap_sec: int = Field(default=30, alias="MIN_REQUEST_GAP_SEC")
 
     fetcher: str = Field(default="avito_search", alias="FETCHER")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     avito_proxy: str | None = Field(default=None, alias="AVITO_PROXY")
     avito_proxy_change_url: str | None = Field(default=None, alias="AVITO_PROXY_CHANGE_URL")
+    avito_cookies_api_key: str | None = Field(default=None, alias="AVITO_COOKIES_API_KEY")
     avito_use_webdriver: bool = Field(default=True, alias="AVITO_USE_WEBDRIVER")
     avito_cookies_path: str = Field(default="./avito_cookies.json", alias="AVITO_COOKIES_PATH")
     avito_max_pages: int = Field(default=1, alias="AVITO_MAX_PAGES")
@@ -39,13 +42,6 @@ class Settings(BaseSettings):
     avito_geo_filter: str | None = Field(default=None, alias="AVITO_GEO_FILTER")
 
     mock_data_path: str = Field(default="./mock_listings.json", alias="MOCK_DATA_PATH")
-
-    llm_enabled: bool = Field(default=False, alias="LLM_ENABLED")
-    llm_provider: str = Field(default="openai", alias="LLM_PROVIDER")
-    llm_api_key: str | None = Field(default=None, alias="LLM_API_KEY")
-    llm_model: str = Field(default="gpt-4o-mini", alias="LLM_MODEL")
-    llm_base_url: str = Field(default="https://api.openai.com/v1", alias="LLM_BASE_URL")
-    llm_timeout_sec: int = Field(default=15, alias="LLM_TIMEOUT_SEC")
 
 
 settings = Settings()

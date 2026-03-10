@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dropwatch
+      POSTGRES_USER: dropwatch
+      POSTGRES_PASSWORD: dropwatch
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dropwatch -d dropwatch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - dropwatch-postgres:/var/lib/postgresql/data
+
+  bot:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://dropwatch:dropwatch@postgres:5432/dropwatch
+      AVITO_COOKIES_PATH: ./data/avito_cookies.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - dropwatch-data:/app/data
+    command: python -m dropwatch.bot
+
+  monitor:
+    build: .
+    restart: unless-stopped
+    init: true
+    shm_size: 1gb
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://dropwatch:dropwatch@postgres:5432/dropwatch
+      AVITO_COOKIES_PATH: ./data/avito_cookies.json
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - dropwatch-data:/app/data
+    command: python -m dropwatch.monitor
+
+volumes:
+  dropwatch-data:
+  dropwatch-postgres:

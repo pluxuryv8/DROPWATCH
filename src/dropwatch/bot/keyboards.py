@@ -30,12 +30,12 @@ def quick_setup_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="📱 Моб. прокси", callback_data="quickcfg:proxy"),
-                InlineKeyboardButton(text="🔄 Смена IP", callback_data="quickcfg:ip"),
+                InlineKeyboardButton(text="1. Прокси", callback_data="quickcfg:proxy"),
+                InlineKeyboardButton(text="2. Смена IP", callback_data="quickcfg:ip"),
             ],
             [
-                InlineKeyboardButton(text="🔗 Добавить ссылку", callback_data="quickcfg:link"),
-                InlineKeyboardButton(text="▶️ Старт мониторинга", callback_data="quickcfg:start"),
+                InlineKeyboardButton(text="3. Ссылка Avito", callback_data="quickcfg:link"),
+                InlineKeyboardButton(text="4. Запустить", callback_data="quickcfg:start"),
             ],
         ]
     )
@@ -209,11 +209,12 @@ def events_keyboard(event_new: bool, event_price: bool, event_update: bool) -> I
 def listing_actions_keyboard(task_id: int, listing_id: str, url: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🔗 Открыть на Авито", url=url)],
-            [InlineKeyboardButton(text="✅ Отметить как просмотрено", callback_data=f"seen:{task_id}:{listing_id}")],
+            [InlineKeyboardButton(text="🔗 Открыть объявление", url=url)],
+            [
+                InlineKeyboardButton(text="🙈 Скрыть", callback_data=f"seen:{task_id}:{listing_id}"),
+                InlineKeyboardButton(text="⭐ Сохранить", callback_data=f"fav:{task_id}:{listing_id}"),
+            ],
             [InlineKeyboardButton(text="⏸ Пауза радара", callback_data=f"task_pause:{task_id}")],
-            [InlineKeyboardButton(text="🛑 Стоп радар", callback_data=f"task_stop:{task_id}")],
-            [InlineKeyboardButton(text="⭐ В избранное", callback_data=f"fav:{task_id}:{listing_id}")],
         ]
     )
 

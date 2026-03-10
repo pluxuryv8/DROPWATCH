@@ -136,8 +136,8 @@ async def pause_tasks_for_user(session: AsyncSession, user_id: int) -> None:
     await session.commit()
 
 
-async def list_due_tasks(session: AsyncSession, now: datetime) -> list[Task]:
-    result = await session.execute(
+async def list_due_tasks(session: AsyncSession, now: datetime, owner_tg_id: int | None = None) -> list[Task]:
+    stmt = (
         select(Task)
         .join(User, Task.user_id == User.id)
         .outerjoin(Settings, Settings.user_id == User.id)
@@ -146,6 +146,9 @@ async def list_due_tasks(session: AsyncSession, now: datetime) -> list[Task]:
             or_(Settings.id.is_(None), Settings.monitor_enabled.is_(True)),
         )
     )
+    if owner_tg_id is not None:
+        stmt = stmt.where(User.tg_id == owner_tg_id)
+    result = await session.execute(stmt)
     tasks = list(result.scalars())
     due: list[Task] = []
     for task in tasks:

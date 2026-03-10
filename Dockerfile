@@ -2,6 +2,7 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/src
 
 WORKDIR /app
 
@@ -12,4 +13,4 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY . /app
 
-CMD ["sh", "-lc", "PYTHONPATH=src python -m dropwatch.bot & PYTHONPATH=src python -m dropwatch.monitor & wait -n"]
+CMD ["python", "-m", "dropwatch.bot"]

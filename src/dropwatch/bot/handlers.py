@@ -41,6 +41,7 @@ from dropwatch.common.avito_url import extract_task_name, is_avito_url, parse_se
 from dropwatch.common.config import settings
 from dropwatch.common.formatting import format_price
 from dropwatch.common.secrets import decode_secret, encode_secret
+from dropwatch.common.single_tenant import single_tenant_enabled
 from dropwatch.db import crud
 from dropwatch.db.database import get_sessionmaker
 from dropwatch.db.models import Condition, Delivery, SellerType, TaskStatus
@@ -94,7 +95,7 @@ async def _get_or_create_user_settings(session, tg_id: int):
     monitor_settings = await crud.get_or_create_settings(
         session,
         user_id=user.id,
-        default_interval=settings.default_task_interval_sec,
+        default_interval=user.default_interval_sec,
     )
     return user, monitor_settings
 
@@ -150,6 +151,71 @@ def _missing_antiban_fields(monitor_settings) -> list[str]:
     return missing
 
 
+def _text_meta(value: str | None) -> str:
+    if value is None:
+        return "none"
+    stripped = value.strip()
+    if not stripped:
+        return "empty"
+    return f"{len(stripped)} chars"
+
+
+def _default_interval_sec(user, monitor_settings=None) -> int:
+    base_value = (
+        getattr(user, "default_interval_sec", None)
+        or getattr(monitor_settings, "interval", None)
+        or settings.default_task_interval_sec
+    )
+    return max(10, int(base_value))
+
+
+def _status_flag(value: bool) -> str:
+    return "да" if value else "нет"
+
+
+def _format_status_text(user, monitor_settings, tasks: list) -> str:
+    active_count = sum(1 for task in tasks if task.status == TaskStatus.active)
+    paused_count = sum(1 for task in tasks if task.status == TaskStatus.paused)
+    stopped_count = sum(1 for task in tasks if task.status == TaskStatus.stopped)
+    last_checked = max((task.last_checked_at for task in tasks if task.last_checked_at), default=None)
+    missing_antiban = _missing_antiban_fields(monitor_settings)
+
+    lines = [
+        "Статус сервиса:",
+        f"Личный режим: {_status_flag(single_tenant_enabled())}",
+        f"Владелец: {settings.owner_tg_id or user.tg_id}",
+        f"Мониторинг: {_status_flag(bool(monitor_settings.monitor_enabled))}",
+        f"Радаров всего: {len(tasks)}",
+        f"Активных: {active_count}",
+        f"На паузе: {paused_count}",
+        f"Остановленных: {stopped_count}",
+        f"Интервал по умолчанию: {_default_interval_sec(user, monitor_settings)} сек",
+        f"Прокси задан: {_status_flag(bool(decode_secret(monitor_settings.proxy_b64)))}",
+        f"Смена IP задана: {_status_flag(bool(decode_secret(monitor_settings.proxy_change_url_b64)))}",
+        f"Cookies API задан: {_status_flag(bool(decode_secret(monitor_settings.cookies_api_key_b64) or settings.avito_cookies_api_key))}",
+        f"Последняя проверка: {last_checked.strftime('%Y-%m-%d %H:%M:%S UTC') if last_checked else 'еще не было'}",
+    ]
+    if missing_antiban:
+        lines.append(f"Нужно заполнить: {' '.join(missing_antiban)}")
+    else:
+        lines.append("Антибан: базово настроен")
+    return "\n".join(lines)
+
+
+async def _save_default_interval(session, user_id: int, interval_sec: int) -> None:
+    await crud.update_user_settings(session, user_id, default_interval_sec=interval_sec)
+    await crud.get_or_create_settings(session, user_id=user_id, default_interval=interval_sec)
+    await crud.update_settings(session, user_id, interval=interval_sec)
+
+
+async def _update_user_task(session, tg_id: int, task_id: int, **kwargs) -> bool:
+    task = await _get_user_task(session, tg_id, task_id)
+    if not task:
+        return False
+    await crud.update_task(session, task.id, **kwargs)
+    return True
+
+
 @router.message(Command("start"))
 async def start(message: Message, state: FSMContext) -> None:
     logger.info("Command /start: user_id=%s chat_id=%s", message.from_user.id, message.chat.id)
@@ -162,12 +228,12 @@ async def start(message: Message, state: FSMContext) -> None:
             timezone_str=settings.default_timezone,
             default_interval=settings.default_task_interval_sec,
         )
-        await crud.get_or_create_settings(session, user.id, default_interval=settings.default_task_interval_sec)
+        await crud.get_or_create_settings(session, user.id, default_interval=user.default_interval_sec)
     await message.answer(START_TEXT, reply_markup=main_menu())
     await message.answer(
-        "Антибан обязателен: сначала /set_proxy и /set_proxy_change_url, потом /set_link."
+        "Сначала настрой антибан: /set_proxy и /set_proxy_change_url. Потом добавь ссылку через /set_link."
     )
-    await message.answer("Быстрая настройка:", reply_markup=quick_setup_keyboard())
+    await message.answer("Быстрая настройка в 4 шага:", reply_markup=quick_setup_keyboard())
 
 
 @router.message(Command("set_proxy"))
@@ -176,6 +242,17 @@ async def set_proxy_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(SetupState.proxy)
     await message.answer("Введи прокси в формате http://user:pass@ip:port или `none`.", reply_markup=skip_cancel_keyboard())
+
+
+@router.message(Command("status"))
+async def show_status(message: Message, state: FSMContext) -> None:
+    logger.info("Command /status: user_id=%s", message.from_user.id)
+    await state.clear()
+    session_maker = get_sessionmaker()
+    async with session_maker() as session:
+        user, monitor_settings = await _get_or_create_user_settings(session, message.from_user.id)
+        tasks = await crud.list_tasks(session, user.id)
+    await message.answer(_format_status_text(user, monitor_settings, tasks), reply_markup=main_menu())
 
 
 @router.callback_query(F.data == "quickcfg:proxy")
@@ -256,6 +333,7 @@ async def start_monitor(message: Message) -> None:
     session_maker = get_sessionmaker()
     async with session_maker() as session:
         user, monitor_settings = await _get_or_create_user_settings(session, message.from_user.id)
+        tasks = await crud.list_tasks(session, user.id)
         missing = _missing_antiban_fields(monitor_settings)
         if missing:
             await message.answer(
@@ -264,7 +342,12 @@ async def start_monitor(message: Message) -> None:
             )
             return
         await crud.update_settings(session, user.id, monitor_enabled=True)
-    await message.answer("Мониторинг включен.")
+    if tasks:
+        await message.answer(f"Мониторинг включен. Радаров в системе: {len(tasks)}.")
+    else:
+        await message.answer(
+            "Мониторинг включен, но радаров пока нет. Добавь ссылку через /set_link или просто пришли ссылку Avito."
+        )
 
 
 @router.callback_query(F.data == "quickcfg:start")
@@ -272,6 +355,7 @@ async def quickcfg_start_monitor(callback: CallbackQuery) -> None:
     session_maker = get_sessionmaker()
     async with session_maker() as session:
         user, monitor_settings = await _get_or_create_user_settings(session, callback.from_user.id)
+        tasks = await crud.list_tasks(session, user.id)
         missing = _missing_antiban_fields(monitor_settings)
         if missing:
             await callback.message.answer(
@@ -281,7 +365,12 @@ async def quickcfg_start_monitor(callback: CallbackQuery) -> None:
             await callback.answer()
             return
         await crud.update_settings(session, user.id, monitor_enabled=True)
-    await callback.message.answer("Мониторинг включен.")
+    if tasks:
+        await callback.message.answer(f"Мониторинг включен. Радаров в системе: {len(tasks)}.")
+    else:
+        await callback.message.answer(
+            "Мониторинг включен, но радаров пока нет. Добавь ссылку через /set_link или просто пришли ссылку Avito."
+        )
     await callback.answer()
 
 
@@ -292,7 +381,7 @@ async def stop_monitor(message: Message) -> None:
     async with session_maker() as session:
         user, _ = await _get_or_create_user_settings(session, message.from_user.id)
         await crud.update_settings(session, user.id, monitor_enabled=False)
-    await message.answer("Мониторинг остановлен.")
+    await message.answer("Мониторинг остановлен. Все радары сохранены.")
 
 
 @router.callback_query(F.data == "quickcfg:stop")
@@ -301,7 +390,7 @@ async def quickcfg_stop_monitor(callback: CallbackQuery) -> None:
     async with session_maker() as session:
         user, _ = await _get_or_create_user_settings(session, callback.from_user.id)
         await crud.update_settings(session, user.id, monitor_enabled=False)
-    await callback.message.answer("Мониторинг остановлен.")
+    await callback.message.answer("Мониторинг остановлен. Все радары сохранены.")
     await callback.answer()
 
 
@@ -490,7 +579,7 @@ async def set_link_keywords_black(message: Message, state: FSMContext) -> None:
     session_maker = get_sessionmaker()
     async with session_maker() as session:
         user, monitor_settings = await _get_or_create_user_settings(session, message.from_user.id)
-        interval = max(10, int(monitor_settings.interval or settings.default_task_interval_sec))
+        interval = _default_interval_sec(user, monitor_settings)
         keyword_text = " ".join(data.get("keywords_white") or [])
         minus_keyword_text = " ".join(black_words) if black_words else None
         task = await crud.create_task(
@@ -543,13 +632,13 @@ async def set_link_keywords_black(message: Message, state: FSMContext) -> None:
 @router.message(Command("help"))
 async def help_cmd(message: Message) -> None:
     logger.info("Command /help: user_id=%s chat_id=%s", message.from_user.id, message.chat.id)
-    await message.answer(HELP_TEXT)
+    await message.answer(HELP_TEXT, reply_markup=main_menu())
 
 
 @router.message(F.text == MENU_HELP)
 async def help_menu(message: Message) -> None:
     logger.info("Help menu: user_id=%s chat_id=%s", message.from_user.id, message.chat.id)
-    await message.answer(HELP_TEXT)
+    await message.answer(HELP_TEXT, reply_markup=main_menu())
 
 
 @router.message(StateFilter(None), F.text.in_(LEGACY_HELP_TEXTS))
@@ -560,10 +649,10 @@ async def help_menu_legacy(message: Message) -> None:
 @router.message(StateFilter(None), F.text.contains("avito"))
 async def quick_link_anywhere(message: Message, state: FSMContext) -> None:
     logger.info(
-        "Quick link auto-detect: user_id=%s chat_id=%s text=%s",
+        "Quick link auto-detect: user_id=%s chat_id=%s text_meta=%s",
         message.from_user.id,
         message.chat.id,
-        message.text,
+        _text_meta(message.text),
     )
     await state.set_state(QuickSearch.link)
     await quick_search_link(message, state)
@@ -572,11 +661,11 @@ async def quick_link_anywhere(message: Message, state: FSMContext) -> None:
 @router.message(QuickSearch.link)
 async def quick_search_link(message: Message, state: FSMContext) -> None:
     logger.info(
-        "Quick link step: user_id=%s chat_id=%s state=%s text=%s",
+        "Quick link step: user_id=%s chat_id=%s state=%s text_meta=%s",
         message.from_user.id,
         message.chat.id,
         await state.get_state(),
-        message.text,
+        _text_meta(message.text),
     )
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
@@ -613,11 +702,11 @@ async def quick_search_link(message: Message, state: FSMContext) -> None:
 @router.message(QuickSearch.max_price)
 async def quick_search_max_price(message: Message, state: FSMContext) -> None:
     logger.info(
-        "Quick max price step: user_id=%s chat_id=%s state=%s text=%s",
+        "Quick max price step: user_id=%s chat_id=%s state=%s text_meta=%s",
         message.from_user.id,
         message.chat.id,
         await state.get_state(),
-        message.text,
+        _text_meta(message.text),
     )
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
@@ -639,9 +728,9 @@ async def quick_search_max_price(message: Message, state: FSMContext) -> None:
         monitor_settings = await crud.get_or_create_settings(
             session,
             user_id=user.id,
-            default_interval=settings.default_task_interval_sec,
+            default_interval=user.default_interval_sec,
         )
-        interval = int(monitor_settings.interval or settings.default_task_interval_sec)
+        interval = _default_interval_sec(user, monitor_settings)
         await state.update_data(interval_sec=interval, price_max=price_max)
         data = await state.get_data()
         logger.info(
@@ -691,7 +780,7 @@ async def create_task_start_legacy(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.name)
 async def create_task_name(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.name: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.name: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -706,7 +795,7 @@ async def create_task_name(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.keywords)
 async def create_task_keywords(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.keywords: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.keywords: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -718,7 +807,7 @@ async def create_task_keywords(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.search_url)
 async def create_task_search_url(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.search_url: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.search_url: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -747,7 +836,7 @@ async def create_task_search_url(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.minus_keywords)
 async def create_task_minus(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.minus_keywords: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.minus_keywords: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -759,7 +848,7 @@ async def create_task_minus(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.city)
 async def create_task_city(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.city: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.city: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -775,7 +864,7 @@ async def create_task_city(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.radius)
 async def create_task_radius(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.radius: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.radius: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -793,7 +882,7 @@ async def create_task_radius(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.price_min)
 async def create_task_price_min(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.price_min: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.price_min: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -811,7 +900,7 @@ async def create_task_price_min(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.price_max)
 async def create_task_price_max(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.price_max: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.price_max: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -829,7 +918,7 @@ async def create_task_price_max(message: Message, state: FSMContext) -> None:
 
 @router.message(CreateTask.category)
 async def create_task_category(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.category: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.category: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == CANCEL_TEXT:
         await _cancel_flow(message, state)
         return
@@ -886,7 +975,7 @@ async def create_task_interval(callback: CallbackQuery, state: FSMContext) -> No
 
 @router.message(CreateTask.interval)
 async def create_task_interval_custom(message: Message, state: FSMContext) -> None:
-    logger.info("CreateTask.interval_custom: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("CreateTask.interval_custom: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     data = await state.get_data()
     if not data.get("interval_custom"):
         return
@@ -923,7 +1012,7 @@ async def create_task_confirm(callback: CallbackQuery, state: FSMContext) -> Non
         monitor_settings = await crud.get_or_create_settings(
             session,
             user_id=user.id,
-            default_interval=settings.default_task_interval_sec,
+            default_interval=user.default_interval_sec,
         )
         if data.get("quick_flow"):
             await crud.pause_tasks_for_user(session, user.id)
@@ -942,7 +1031,7 @@ async def create_task_confirm(callback: CallbackQuery, state: FSMContext) -> Non
             delivery=Delivery(data.get("delivery", "any")),
             seller_type=SellerType(data.get("seller_type", "any")),
             sort_new_first=True,
-            interval_sec=int(data.get("interval_sec") or monitor_settings.interval or settings.default_task_interval_sec),
+            interval_sec=int(data.get("interval_sec") or _default_interval_sec(user, monitor_settings)),
             status=TaskStatus.active,
             search_url=data.get("search_url"),
             source=settings.fetcher,
@@ -986,7 +1075,13 @@ async def list_tasks(message: Message) -> None:
             default_interval=settings.default_task_interval_sec,
         )
         tasks = await crud.list_tasks(session, user.id)
-    await message.answer("Твои радары:", reply_markup=tasks_keyboard(tasks))
+    if tasks:
+        await message.answer("Твои радары:", reply_markup=tasks_keyboard(tasks))
+    else:
+        await message.answer(
+            "Радаров пока нет. Нажми «Новый радар» или просто пришли ссылку поиска Avito.",
+            reply_markup=main_menu(),
+        )
 
 
 @router.message(StateFilter(None), F.text.in_(LEGACY_TASKS_TEXTS))
@@ -1166,9 +1261,12 @@ async def edit_task_field(callback: CallbackQuery, state: FSMContext) -> None:
     if field == "sort":
         session_maker = get_sessionmaker()
         async with session_maker() as session:
-            task = await crud.get_task(session, int(task_id))
+            task = await _get_user_task(session, callback.from_user.id, int(task_id))
             if task:
                 await crud.update_task(session, task.id, sort_new_first=not task.sort_new_first)
+            else:
+                await callback.answer("Радар не найден")
+                return
         await callback.answer("Сортировка обновлена")
         return
 
@@ -1180,7 +1278,7 @@ async def edit_task_field(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(EditTask.text_value)
 async def edit_task_text_value(message: Message, state: FSMContext) -> None:
-    logger.info("EditTask.text_value: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("EditTask.text_value: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     data = await state.get_data()
     field = data.get("field")
     task_id = data.get("task_id")
@@ -1208,7 +1306,11 @@ async def edit_task_text_value(message: Message, state: FSMContext) -> None:
 
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.update_task(session, int(task_id), **update_kwargs)
+        updated = await _update_user_task(session, message.from_user.id, int(task_id), **update_kwargs)
+    if not updated:
+        await message.answer("Радар не найден", reply_markup=main_menu())
+        await state.clear()
+        return
     await message.answer("Обновлено", reply_markup=main_menu())
     await state.clear()
 
@@ -1225,14 +1327,18 @@ async def edit_interval_choice(callback: CallbackQuery, state: FSMContext) -> No
         return
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.update_task(session, int(task_id), interval_sec=int(value))
+        updated = await _update_user_task(session, callback.from_user.id, int(task_id), interval_sec=int(value))
+    if not updated:
+        await state.clear()
+        await callback.answer("Радар не найден")
+        return
     await state.clear()
     await callback.answer("Интервал обновлен")
 
 
 @router.message(EditTask.interval)
 async def edit_interval_custom(message: Message, state: FSMContext) -> None:
-    logger.info("EditTask.interval_custom: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("EditTask.interval_custom: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     data = await state.get_data()
     task_id = data.get("task_id")
     value = _parse_int(message.text or "")
@@ -1241,7 +1347,11 @@ async def edit_interval_custom(message: Message, state: FSMContext) -> None:
         return
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.update_task(session, int(task_id), interval_sec=value * 60)
+        updated = await _update_user_task(session, message.from_user.id, int(task_id), interval_sec=value * 60)
+    if not updated:
+        await message.answer("Радар не найден", reply_markup=main_menu())
+        await state.clear()
+        return
     await state.clear()
     await message.answer("Интервал обновлен", reply_markup=main_menu())
 
@@ -1262,7 +1372,11 @@ async def edit_price_max(message: Message, state: FSMContext) -> None:
             return
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.update_task(session, int(task_id), price_max=price_max)
+        updated = await _update_user_task(session, message.from_user.id, int(task_id), price_max=price_max)
+    if not updated:
+        await message.answer("Радар не найден", reply_markup=main_menu())
+        await state.clear()
+        return
     await state.clear()
     await message.answer("Максимальная цена обновлена", reply_markup=main_menu())
 
@@ -1275,7 +1389,11 @@ async def edit_condition(callback: CallbackQuery, state: FSMContext) -> None:
     task_id = data.get("task_id")
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.update_task(session, int(task_id), condition=Condition(value))
+        updated = await _update_user_task(session, callback.from_user.id, int(task_id), condition=Condition(value))
+    if not updated:
+        await state.clear()
+        await callback.answer("Радар не найден")
+        return
     await state.clear()
     await callback.answer("Состояние обновлено")
 
@@ -1288,7 +1406,11 @@ async def edit_delivery(callback: CallbackQuery, state: FSMContext) -> None:
     task_id = data.get("task_id")
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.update_task(session, int(task_id), delivery=Delivery(value))
+        updated = await _update_user_task(session, callback.from_user.id, int(task_id), delivery=Delivery(value))
+    if not updated:
+        await state.clear()
+        await callback.answer("Радар не найден")
+        return
     await state.clear()
     await callback.answer("Доставка обновлена")
 
@@ -1301,7 +1423,11 @@ async def edit_seller(callback: CallbackQuery, state: FSMContext) -> None:
     task_id = data.get("task_id")
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.update_task(session, int(task_id), seller_type=SellerType(value))
+        updated = await _update_user_task(session, callback.from_user.id, int(task_id), seller_type=SellerType(value))
+    if not updated:
+        await state.clear()
+        await callback.answer("Радар не найден")
+        return
     await state.clear()
     await callback.answer("Продавец обновлен")
 
@@ -1381,14 +1507,14 @@ async def settings_interval(callback: CallbackQuery, state: FSMContext) -> None:
     async with session_maker() as session:
         user = await crud.get_user_by_tg(session, callback.from_user.id)
         if user:
-            await crud.update_user_settings(session, user.id, default_interval_sec=interval_sec)
+            await _save_default_interval(session, user.id, interval_sec)
     await state.clear()
     await callback.answer("Интервал обновлен")
 
 
 @router.message(SettingsState.default_interval)
 async def settings_interval_custom(message: Message, state: FSMContext) -> None:
-    logger.info("Settings interval custom: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("Settings interval custom: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     value = _parse_int(message.text or "")
     if value is None:
         await message.answer("Введи число минут, например 2")
@@ -1397,14 +1523,14 @@ async def settings_interval_custom(message: Message, state: FSMContext) -> None:
     async with session_maker() as session:
         user = await crud.get_user_by_tg(session, message.from_user.id)
         if user:
-            await crud.update_user_settings(session, user.id, default_interval_sec=value * 60)
+            await _save_default_interval(session, user.id, value * 60)
     await state.clear()
     await message.answer("Интервал обновлен", reply_markup=main_menu())
 
 
 @router.message(SettingsState.quiet_start)
 async def settings_quiet_start(message: Message, state: FSMContext) -> None:
-    logger.info("Settings quiet start: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("Settings quiet start: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     text = message.text
     if text == SKIP_TEXT:
         await _save_quiet_hours(message, None, None)
@@ -1417,7 +1543,7 @@ async def settings_quiet_start(message: Message, state: FSMContext) -> None:
 
 @router.message(SettingsState.quiet_end)
 async def settings_quiet_end(message: Message, state: FSMContext) -> None:
-    logger.info("Settings quiet end: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("Settings quiet end: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     data = await state.get_data()
     start = data.get("quiet_start")
     end = message.text
@@ -1439,7 +1565,7 @@ async def _save_quiet_hours(message: Message, start: str | None, end: str | None
 
 @router.message(SettingsState.notify_limit)
 async def settings_limit(message: Message, state: FSMContext) -> None:
-    logger.info("Settings limit: user_id=%s text=%s", message.from_user.id, message.text)
+    logger.info("Settings limit: user_id=%s text_meta=%s", message.from_user.id, _text_meta(message.text))
     if message.text == SKIP_TEXT:
         limit = None
     else:
@@ -1488,7 +1614,11 @@ async def mark_seen(callback: CallbackQuery) -> None:
     _, task_id, listing_id = callback.data.split(":", 2)
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        await crud.mute_seen_listing(session, int(task_id), listing_id)
+        task = await _get_user_task(session, callback.from_user.id, int(task_id))
+        if not task:
+            await callback.answer("Радар не найден")
+            return
+        await crud.mute_seen_listing(session, task.id, listing_id)
     await callback.answer("Отмечено")
 
 
@@ -1502,7 +1632,11 @@ async def add_favorite(callback: CallbackQuery) -> None:
         if not user:
             await callback.answer("Сначала нажми /start")
             return
-        seen = await crud.get_seen_listing(session, int(task_id), listing_id)
+        task = await _get_user_task(session, callback.from_user.id, int(task_id))
+        if not task:
+            await callback.answer("Радар не найден")
+            return
+        seen = await crud.get_seen_listing(session, task.id, listing_id)
         if seen:
             await crud.add_favorite(
                 session,
@@ -1521,12 +1655,12 @@ async def add_favorite(callback: CallbackQuery) -> None:
 @router.message()
 async def log_any_message(message: Message, state: FSMContext) -> None:
     logger.info(
-        "Raw message: user_id=%s chat_id=%s type=%s state=%s text=%s",
+        "Raw message: user_id=%s chat_id=%s type=%s state=%s text_meta=%s",
         message.from_user.id if message.from_user else None,
         message.chat.id if message.chat else None,
         message.content_type,
         await state.get_state(),
-        message.text,
+        _text_meta(message.text),
     )
 
 
