@@ -144,9 +144,9 @@ def _words_to_text(words: list[str]) -> str:
 
 def _missing_antiban_fields(monitor_settings) -> list[str]:
     missing: list[str] = []
-    if not decode_secret(getattr(monitor_settings, "proxy_b64", None)):
+    if not (decode_secret(getattr(monitor_settings, "proxy_b64", None)) or settings.avito_proxy):
         missing.append("/set_proxy")
-    if not decode_secret(getattr(monitor_settings, "proxy_change_url_b64", None)):
+    if not (decode_secret(getattr(monitor_settings, "proxy_change_url_b64", None)) or settings.avito_proxy_change_url):
         missing.append("/set_proxy_change_url")
     return missing
 
@@ -190,8 +190,8 @@ def _format_status_text(user, monitor_settings, tasks: list) -> str:
         f"На паузе: {paused_count}",
         f"Остановленных: {stopped_count}",
         f"Интервал по умолчанию: {_default_interval_sec(user, monitor_settings)} сек",
-        f"Прокси задан: {_status_flag(bool(decode_secret(monitor_settings.proxy_b64)))}",
-        f"Смена IP задана: {_status_flag(bool(decode_secret(monitor_settings.proxy_change_url_b64)))}",
+        f"Прокси задан: {_status_flag(bool(decode_secret(monitor_settings.proxy_b64) or settings.avito_proxy))}",
+        f"Смена IP задана: {_status_flag(bool(decode_secret(monitor_settings.proxy_change_url_b64) or settings.avito_proxy_change_url))}",
         f"Cookies API задан: {_status_flag(bool(decode_secret(monitor_settings.cookies_api_key_b64) or settings.avito_cookies_api_key))}",
         f"Последняя проверка: {last_checked.strftime('%Y-%m-%d %H:%M:%S UTC') if last_checked else 'еще не было'}",
     ]
@@ -222,17 +222,16 @@ async def start(message: Message, state: FSMContext) -> None:
     await state.clear()
     session_maker = get_sessionmaker()
     async with session_maker() as session:
-        user = await crud.get_or_create_user(
-            session,
-            tg_id=message.from_user.id,
-            timezone_str=settings.default_timezone,
-            default_interval=settings.default_task_interval_sec,
-        )
-        await crud.get_or_create_settings(session, user.id, default_interval=user.default_interval_sec)
+        user, monitor_settings = await _get_or_create_user_settings(session, message.from_user.id)
+        missing_antiban = _missing_antiban_fields(monitor_settings)
     await message.answer(START_TEXT, reply_markup=main_menu())
-    await message.answer(
-        "Сначала настрой антибан: /set_proxy и /set_proxy_change_url. Потом добавь ссылку через /set_link."
-    )
+    if missing_antiban:
+        await message.answer(
+            "Перед первым запуском нужно настроить доступ к Avito: "
+            f"{' и '.join(missing_antiban)}."
+        )
+    else:
+        await message.answer("Все готово. Теперь просто пришли ссылку поиска Avito или используй /set_link.")
     await message.answer("Быстрая настройка в 4 шага:", reply_markup=quick_setup_keyboard())
 
 

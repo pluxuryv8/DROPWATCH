@@ -49,8 +49,9 @@ class RateLimitState:
 def _build_fetch_profile(user_settings) -> AvitoRuntimeProfile:
     cookies_path_suffix = str(getattr(user_settings, "user_id", "default"))
     return AvitoRuntimeProfile(
-        proxy=decode_secret(getattr(user_settings, "proxy_b64", None)),
-        proxy_change_url=decode_secret(getattr(user_settings, "proxy_change_url_b64", None)),
+        proxy=decode_secret(getattr(user_settings, "proxy_b64", None)) or settings.avito_proxy,
+        proxy_change_url=decode_secret(getattr(user_settings, "proxy_change_url_b64", None))
+        or settings.avito_proxy_change_url,
         cookies_api_key=(
             decode_secret(getattr(user_settings, "cookies_api_key_b64", None))
             or settings.avito_cookies_api_key
